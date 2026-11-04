@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Move the cuMES codec regression tests into this repository: historical binary
+  layouts, checkpoints, asymmetric provenance, malformed containers, and atomic
+  publication failures. They run without cuMES or CUDA.
+- Add ASan/UBSan codec tests and binary-only WebAssembly CI.
+- Make the repository public.
+
 ## 0.1.0 — 2026-11-05
 
 - Extract the cuMES equilibrium records and codecs into an independent C++20

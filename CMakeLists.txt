@@ -11,7 +11,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 option(EQUILIBRIUM_USE_NETCDF "Read and write NetCDF containers" ON)
 option(EQUILIBRIUM_USE_HDF5 "Read and write HDF5 containers" ON)
-option(EQUILIBRIUM_BUILD_TESTS "Build standalone contract tests" ${EQUILIBRIUM_STANDALONE})
+option(EQUILIBRIUM_BUILD_TESTS "Build codec and data contract tests" ${EQUILIBRIUM_STANDALONE})
 option(EQUILIBRIUM_BUILD_TOOLS "Build the equilibrium converter" ${EQUILIBRIUM_STANDALONE})
 
 include(cmake/sources.cmake)
@@ -97,16 +97,5 @@ endif()
 
 if(EQUILIBRIUM_BUILD_TESTS)
   enable_testing()
-  add_executable(equilibrium_contract tests/contract.cpp)
-  target_link_libraries(equilibrium_contract PRIVATE equilibrium::io)
-  add_test(NAME equilibrium_contract
-    COMMAND equilibrium_contract ${CMAKE_CURRENT_BINARY_DIR}/test-data)
-  if(EQUILIBRIUM_STANDALONE)
-    add_test(NAME equilibrium_installed_components
-      COMMAND ${CMAKE_COMMAND}
-        -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
-        -DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
-        -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/installed_components.cmake)
-  endif()
+  add_subdirectory(tests)
 endif()

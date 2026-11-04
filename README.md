@@ -46,7 +46,7 @@ FetchContent_MakeAvailable(equilibrium_io)
 target_link_libraries(analysis PRIVATE equilibrium::io)
 ```
 
-The repository is private; Git needs an account or key with read access.
+The repository is public; cloning does not require a GitHub account.
 `add_subdirectory(deps/equilibrium-io)` also works with a pinned submodule.
 Set the codec options before adding the dependency. When embedding cuMES,
 add cuMES first and link its existing `equilibrium::data`, `equilibrium::binary`,
@@ -57,7 +57,19 @@ build. Installed cuMES consumers reuse its `find_dependency(equilibrium_io)`.
 
 Run the tests with both codecs enabled, each enabled alone, and both disabled.
 The package tests also install and compile external data, binary, and full-I/O
-consumers. CI runs this matrix without CUDA.
+consumers. CI runs this matrix without CUDA, plus ASan/UBSan and binary-only
+WebAssembly checks.
+
+The suite covers historical binary layouts, checkpoints, asymmetric input,
+malformed container shapes and restart offsets, and atomic publication failures.
+cuMES keeps its configuration adapter, device transfer, derived-field physics,
+solver/CLI, Python plotting, and browser integration tests.
+
+Enable `EQUILIBRIUM_SANITIZER_TESTS=ON` to build ASan/UBSan copies of the codecs
+and their tests. These copies are not installed. CTest writes fixtures beneath
+the build directory. A binary-only Emscripten build runs the same codec tests
+through Node; installed-consumer checks and Linux filesystem fault probes run
+only in native builds.
 
 Update the CMake version and changelog before tagging a release. Treat C++ API
 compatibility and file compatibility separately: an API change does not permit
