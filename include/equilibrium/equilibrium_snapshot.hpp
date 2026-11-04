@@ -1,0 +1,152 @@
+// equilibrium_snapshot.hpp — host-side state and derived-field snapshot
+// (blueprint §6.13).
+//
+// The single host representation every writer consumes. The active coefficient
+// families are double on the host regardless of the computation scalar type
+// (the device->host copy converts T -> double). Each family is laid out
+// mode-major, surface-contiguous: index = surface + mode * ns, matching the
+// device column-major layout.
+#ifndef EQUILIBRIUM_INCLUDE_IO_EQUILIBRIUM_SNAPSHOT_HPP_
+#define EQUILIBRIUM_INCLUDE_IO_EQUILIBRIUM_SNAPSHOT_HPP_
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <vector>
+
+namespace equilibrium {
+
+template <class Buffer>
+struct BasicSnapshot {
+    enum Component : std::uint8_t {
+        RMNCC = 0,  // R: cos(mθ)cos(nζ)
+        ZMNSC = 1,  // Z: sin(mθ)cos(nζ)
+        LMNSC = 2,  // λ: sin(mθ)cos(nζ)
+        RMNSS = 3,  // R: sin(mθ)sin(nζ)
+        ZMNCS = 4,  // Z: cos(mθ)sin(nζ)
+        LMNCS = 5,  // λ: cos(mθ)sin(nζ)
+        COUNT = 6,  // Legacy symmetric family count.
+        RMNSC = 6,
+        ZMNCC = 7,
+        LMNCC = 8,
+        RMNCS = 9,
+        ZMNSS = 10,
+        LMNSS = 11,
+        ASYMMETRIC_COUNT = 12,
+    };
+
+    int ns = 0;
+    int mnmax = 0;
+    // families[c] has ns * mnmax doubles, mode-major (surface contiguous).
+    std::vector<Buffer> families = std::vector<Buffer>(COUNT);
+
+    bool lasym() const { return families.size() == ASYMMETRIC_COUNT; }
+    int components() const { return static_cast<int>(families.size()); }
+
+    // Scientific result fields. The solver state above remains mode-major;
+    // these real-space arrays use the native point-major layout
+    //   point + surface * (ntheta * nzeta),
+    // where point = theta + zeta * ntheta. Magnetic quantities and sqrt(g)
+    // live on the ns-1 half grid. Current-density quantities are derived from
+    // curl(B)/mu0 on the ns-point full grid, with explicit linear endpoint
+    // extrapolation.
+    enum HalfField : std::uint8_t {
+        SQRTG = 0,
+        BSUPS = 1,
+        BSUPU = 2,
+        BSUPV = 3,
+        BSUBS = 4,
+        BSUBU = 5,
+        BSUBV = 6,
+        HALF_FIELD_COUNT = 7,
+    };
+
+    enum FullField : std::uint8_t {
+        JSUPS = 0,
+        JSUPU = 1,
+        JSUPV = 2,
+        JSUBS = 3,
+        JSUBU = 4,
+        JSUBV = 5,
+        FULL_FIELD_COUNT = 6,
+    };
+
+    int ntheta = 0;
+    int nzeta = 0;
+    std::array<Buffer, HALF_FIELD_COUNT> half_fields;
+    std::array<Buffer, FULL_FIELD_COUNT> full_fields;
+
+    // Origin of decoded data; zero means an in-memory producer.
+    int source_version = 0;
+    bool source_checkpoint = false;
+
+    const Buffer& component(Component c) const {
+        return families[static_cast<int>(c)];
+    }
+    Buffer& component(Component c) { return families[static_cast<int>(c)]; }
+
+    // Number of doubles per family (ns * mnmax).
+    std::size_t family_size() const {
+        return static_cast<std::size_t>(ns) * static_cast<std::size_t>(mnmax);
+    }
+
+    std::size_t points_per_surface() const {
+        return static_cast<std::size_t>(ntheta) *
+               static_cast<std::size_t>(nzeta);
+    }
+
+    std::size_t half_field_size() const {
+        return ns > 0 ? static_cast<std::size_t>(ns - 1) * points_per_surface()
+                      : 0;
+    }
+
+    std::size_t full_field_size() const {
+        return static_cast<std::size_t>(ns) * points_per_surface();
+    }
+
+    bool has_derived_fields() const {
+        if (ntheta <= 0 || nzeta <= 0 || ns <= 1) return false;
+        const std::size_t half_size = half_field_size();
+        const std::size_t full_size = full_field_size();
+        for (const auto& field : half_fields)
+            if (field.size() != half_size) return false;
+        for (const auto& field : full_fields)
+            if (field.size() != full_size) return false;
+        return true;
+    }
+
+    bool has_any_derived_fields() const {
+        if (ntheta != 0 || nzeta != 0) return true;
+        for (const auto& field : half_fields)
+            if (!field.empty()) return true;
+        for (const auto& field : full_fields)
+            if (!field.empty()) return true;
+        return false;
+    }
+};
+
+using EquilibriumSnapshot = BasicSnapshot<std::vector<double>>;
+using SnapshotView = BasicSnapshot<std::span<const double>>;
+
+inline SnapshotView as_view(const EquilibriumSnapshot& owner) {
+    SnapshotView view;
+    view.source_version = owner.source_version;
+    view.source_checkpoint = owner.source_checkpoint;
+    view.ns = owner.ns;
+    view.mnmax = owner.mnmax;
+    view.ntheta = owner.ntheta;
+    view.nzeta = owner.nzeta;
+    view.families.assign(owner.families.begin(), owner.families.end());
+    for (std::size_t i = 0; i < view.half_fields.size(); ++i)
+        view.half_fields[i] = owner.half_fields[i];
+    for (std::size_t i = 0; i < view.full_fields.size(); ++i)
+        view.full_fields[i] = owner.full_fields[i];
+    return view;
+}
+SnapshotView as_view(EquilibriumSnapshot&&) = delete;
+SnapshotView as_view(const EquilibriumSnapshot&&) = delete;
+
+}  // namespace equilibrium
+
+#endif  // EQUILIBRIUM_INCLUDE_IO_EQUILIBRIUM_SNAPSHOT_HPP_
