@@ -31,7 +31,7 @@ static InputParams make_params(bool empty) {
     p.ntheta = 12;
     p.nzeta = 6;
     p.aphi = {1.0};
-    p.stages = {{5, 100, 1e-10}};
+    p.stages.push_back({5, 100, 1e-10});
     p.rbc_m = {0, 1};
     p.rbc_n = {0, 0};
     p.rbc_value = {4.0, 1.0};

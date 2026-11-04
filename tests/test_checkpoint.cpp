@@ -68,7 +68,7 @@ static equilibrium::InputParams make_params() {
     p.rbss = {0.0, 0.0};
     p.zbsc = {0.0, 0.0};
     p.zbcs = {0.5, 0.0};
-    p.stages = {{5, 100, 1e-12}};
+    p.stages.push_back({5, 100, 1e-12});
     return p;
 }
 
