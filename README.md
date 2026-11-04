@@ -1,15 +1,18 @@
 # Equilibrium data and I/O
 
 This C++20 package reads and writes cuMES binary, HDF5, and NetCDF equilibrium
-files without CUDA or the cuMES solver. Its source directory can be copied and
-built on its own. VMEC wout and Boozer files are outside its scope.
+files without CUDA or the cuMES solver. VMEC wout and Boozer files are outside
+its scope. The [file compatibility contract](docs/compatibility.md) describes
+the supported schemas and release rules.
 
 ```sh
-cmake -S lib/equilibrium -B build-equilibrium \
+git clone https://github.com/12ff54e/equilibrium-io.git
+cd equilibrium-io
+cmake -S . -B build \
   -DEQUILIBRIUM_USE_NETCDF=ON -DEQUILIBRIUM_USE_HDF5=ON
-cmake --build build-equilibrium
-ctest --test-dir build-equilibrium --output-on-failure
-cmake --install build-equilibrium --prefix /your/install/prefix
+cmake --build build
+ctest --test-dir build --output-on-failure
+cmake --install build --prefix /your/install/prefix
 ```
 
 Disable either codec when its development libraries are unavailable. Binary
@@ -31,6 +34,40 @@ target_link_libraries(analysis PRIVATE equilibrium::io)
 
 Selecting `data` or `binary` does not search for NetCDF, HDF5, or CUDA, even
 when the installed package includes those codecs.
+
+For a source dependency, use a pinned release or commit with FetchContent:
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(equilibrium_io
+  GIT_REPOSITORY https://github.com/12ff54e/equilibrium-io.git
+  GIT_TAG v0.1.0)
+FetchContent_MakeAvailable(equilibrium_io)
+target_link_libraries(analysis PRIVATE equilibrium::io)
+```
+
+The repository is private; Git needs an account or key with read access.
+`add_subdirectory(deps/equilibrium-io)` also works with a pinned submodule.
+Set the codec options before adding the dependency. When embedding cuMES,
+add cuMES first and link its existing `equilibrium::data`, `equilibrium::binary`,
+or `equilibrium::io` targets. Do not add another copy of the package to that
+build. Installed cuMES consumers reuse its `find_dependency(equilibrium_io)`.
+
+## Development and releases
+
+Run the tests with both codecs enabled, each enabled alone, and both disabled.
+The package tests also install and compile external data, binary, and full-I/O
+consumers. CI runs this matrix without CUDA.
+
+Update the CMake version and changelog before tagging a release. Treat C++ API
+compatibility and file compatibility separately: an API change does not permit
+silently changing a persisted schema. Follow the
+[compatibility contract](docs/compatibility.md), commit and publish the tested
+library revision, then update consumer submodule pins. Consumers should cleanly
+rebuild when public C++ layouts change.
+
+The initial library history was split from cuMES commit
+`35fc387` (`lib/equilibrium`). Earlier codec history remains in cuMES.
 
 ## Read, inspect, and write
 

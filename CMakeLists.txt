@@ -76,7 +76,10 @@ foreach(component IN ITEMS data binary io)
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/equilibrium_io)
 endforeach()
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/equilibrium_io)
+install(FILES README.md LICENSE CHANGELOG.md
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/equilibrium_io)
+install(FILES docs/compatibility.md
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/equilibrium_io/docs)
 configure_package_config_file(cmake/equilibrium_ioConfig.cmake.in
   ${CMAKE_CURRENT_BINARY_DIR}/equilibrium_ioConfig.cmake
   INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/equilibrium_io)
