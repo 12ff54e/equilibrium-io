@@ -1,8 +1,8 @@
 # Equilibrium data and I/O
 
 This C++20 package reads and writes cuMES binary, HDF5, and NetCDF equilibrium
-files without CUDA or the cuMES solver. VMEC wout and Boozer files are outside
-its scope. The [file compatibility contract](docs/compatibility.md) describes
+files and magnetic-coordinate Boozer exports without CUDA or either solver.
+External VMEC wout files remain outside its scope. The [file compatibility contract](docs/compatibility.md) describes
 the supported schemas and release rules.
 
 ```sh
@@ -15,8 +15,9 @@ ctest --test-dir build --output-on-failure
 cmake --install build --prefix /your/install/prefix
 ```
 
-Disable either codec when its development libraries are unavailable. Binary
-I/O always builds. `EQUILIBRIUM_BUILD_TOOLS` and `EQUILIBRIUM_BUILD_TESTS`
+`EQUILIBRIUM_USE_NETCDF` and `EQUILIBRIUM_USE_HDF5` accept `AUTO` (the
+default), `ON` (required), or `OFF`. `AUTO` skips unavailable libraries.
+Binary I/O always builds. `EQUILIBRIUM_BUILD_TOOLS` and `EQUILIBRIUM_BUILD_TESTS`
 default to ON for standalone builds and OFF when embedded.
 
 An installed consumer selects one component:
@@ -28,8 +29,8 @@ target_link_libraries(analysis PRIVATE equilibrium::io)
 
 | Component | Interface | Dependencies |
 | --- | --- | --- |
-| `data` | Records, views, structural validation | C++20 standard library |
-| `binary` | Above plus binary results and checkpoints | `data` |
+| `data` | Equilibrium and Boozer records, views, structural validation | C++20 standard library |
+| `binary` | Above plus native/Boozer binary results and checkpoints | `data` |
 | `io` | Above plus format selection and conversion | Enabled NetCDF/HDF5 libraries |
 
 Selecting `data` or `binary` does not search for NetCDF, HDF5, or CUDA, even
@@ -52,6 +53,63 @@ Set the codec options before adding the dependency. When embedding cuMES,
 add cuMES first and link its existing `equilibrium::data`, `equilibrium::binary`,
 or `equilibrium::io` targets. Do not add another copy of the package to that
 build. Installed cuMES consumers reuse its `find_dependency(equilibrium_io)`.
+
+## Boozer exports
+
+`equilibrium/boozer.hpp` holds `BoozerResult` and its optional tracing,
+magnetic-field and surface-profile groups. magnetic-coordinate computes these
+records; this package validates and serializes them. It does not perform a
+Boozer transform.
+
+```cpp
+#include <equilibrium/boozer_binary.hpp>
+#include <equilibrium/boozer_output.hpp>
+
+auto saved = equilibrium::read_boozer_binary("boozer.bin");
+equilibrium::write_boozer_output("boozer.h5", saved.result, saved.source_path);
+```
+
+The [Boozer v8 contract](docs/boozer-output-v8.md) links the preceding schemas.
+The binary component reads Boozer v3–v8 and provides `write_boozer_binary`.
+The `io` component adds suffix dispatch and NetCDF/HDF5 export. `convert` and
+`equilibrium-convert` recognize native equilibria and Boozer binaries. Boozer
+NetCDF/HDF5 input is not supported. Writers retain optional groups and source
+provenance; no absent group is filled with invented values.
+
+## Standalone WebAssembly converter
+
+Use Emscripten 6.0.9 and CMake 3.31.6, matching the tested CI toolchain.
+Activate the SDK and put that CMake version on `PATH` before configuring.
+
+```sh
+emcmake cmake -S . -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-wasm
+ctest --test-dir build-wasm --output-on-failure
+```
+
+This builds `equilibrium-formats.wasm`, the codec libraries and tests, and
+`licenses/` notices. CMake downloads pinned zlib, HDF5 and NetCDF sources and
+builds them for Wasm. It does not search for native scientific libraries.
+Both codec options must be enabled to build the full converter. Set both to
+`OFF` for binary-only library tests, or `EQUILIBRIUM_BUILD_TOOLS=OFF` to omit
+the converter. The usual `equilibrium::data`, `binary`, and `io` targets remain
+available to source consumers.
+
+```js
+import {createFormatsCpu} from './js/formats_cpu.mjs';
+const formats = await createFormatsCpu(wasmBytes);
+const hdf5Bytes = formats.convert(equilibriumBytes, 'h5');
+```
+
+Ship `cpu_wasm.mjs` and `cpu_files.mjs` beside `formats_cpu.mjs`, plus the
+license notices. Conversion uses unshared Wasm memory and copies owned bytes
+through WasmFS. The same module handles native and Boozer exports.
+
+Embedded Emscripten builds can include `cmake/EquilibriumWasm.cmake` and call
+`equilibrium_add_wasm_converter(target TESTS)`. Omit `TESTS` to omit the
+converter fixtures. The target's `EQUILIBRIUM_LICENSE_FILES` property lists the
+notices to stage with the Wasm artifact. The helper owns all source and codec
+paths; it needs no cuMES or magnetic-coordinate checkout.
 
 ## Python readers
 
@@ -102,8 +160,7 @@ should use the package's `equilibrium::binary` and `equilibrium::io` targets.
 
 Run the tests with both codecs enabled, each enabled alone, and both disabled.
 The package tests also install and compile external data, binary, and full-I/O
-consumers. CI runs this matrix without CUDA, plus ASan/UBSan and binary-only
-WebAssembly checks.
+consumers. CI runs this matrix without CUDA, plus ASan/UBSan, binary-only WebAssembly tests and a full Wasm converter check.
 
 The suite covers historical binary layouts, checkpoints, asymmetric input,
 malformed container shapes and restart offsets, and atomic publication failures.

@@ -1,5 +1,7 @@
 #include "equilibrium/io.hpp"
 
+#include "equilibrium/boozer_binary.hpp"
+#include "equilibrium/boozer_output.hpp"
 #include "record_io.hpp"
 
 #include <array>
@@ -56,6 +58,18 @@ Status write(const std::string& path,
 }
 
 Status convert(const std::string& input, const std::string& output) {
+    std::ifstream file(input, std::ios::binary);
+    std::array<char, 8> magic{};
+    file.read(magic.data(), magic.size());
+    const bool boozer = file && std::string_view(magic.data(), 6) == "MCBOOZ";
+    file.close();
+    if (boozer) {
+        try {
+            const auto saved = read_boozer_binary(input);
+            write_boozer_output(output, saved.result, saved.source_path);
+            return {};
+        } catch (const std::exception& error) { return Status(error.what()); }
+    }
     auto owner = read(input);
     if (!owner) return Status(owner.error());
     return write(output, owner.value());

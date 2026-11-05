@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## Unreleased — 0.2.0
+
+- Own Boozer data records, v3–v8 binary reads, and binary/NetCDF/HDF5 exports.
+  Consumers of the moved C++ types must rebuild. Boozer scientific-container
+  reads remain unsupported.
+- Publish Boozer files through the same checked temporary-file/rename path as
+  native equilibria, preserving destinations on failures before publication.
+- Own the standalone Wasm converter, pinned scientific dependencies, filesystem
+  bridge, JavaScript loader, notices, and conversion tests.
+- Accept AUTO/ON/OFF codec policies; AUTO skips missing native libraries.
 
 - Add an installable Python reader and its cross-language fixture tests.
 - Add spectral-only C++ reads that preserve exact payload bytes, and a

@@ -42,6 +42,10 @@ jobs:
 
   wasm:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        codecs: ['OFF', 'ON']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -54,15 +58,17 @@ jobs:
           git -C "$RUNNER_TEMP/emsdk" checkout --detach FETCH_HEAD
           "$RUNNER_TEMP/emsdk/emsdk" install 6.0.9
           "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.9
-      - name: Configure binary-only Wasm
+      - name: CMake for the pinned scientific libraries
+        run: python3 -m pip install cmake==3.31.6
+      - name: Configure Wasm
         run: |
           source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           emcmake cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DEQUILIBRIUM_USE_NETCDF=OFF -DEQUILIBRIUM_USE_HDF5=OFF \
-            -DCMAKE_EXE_LINKER_FLAGS=-sALLOW_MEMORY_GROWTH=1
+            -DEQUILIBRIUM_USE_NETCDF=${{ matrix.codecs }} \
+            -DEQUILIBRIUM_USE_HDF5=${{ matrix.codecs }}
       - name: Build
         run: cmake --build build --parallel 2
-      - name: Binary and checkpoint tests in Node
+      - name: Codec and converter tests in Node
         run: ctest --test-dir build --output-on-failure --no-tests=error
 
   python:

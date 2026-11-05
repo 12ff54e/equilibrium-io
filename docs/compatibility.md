@@ -1,6 +1,7 @@
 # File compatibility contract
 
-The package owns cuMES result and checkpoint codecs. It does not depend on the
+The package owns cuMES result/checkpoint codecs and magnetic-coordinate Boozer
+result codecs. It does not depend on the
 cuMES solver and does not interpret another program's format as cuMES data.
 
 | Container | State recovery | Complete record |
@@ -8,6 +9,8 @@ cuMES solver and does not interpret another program's format as cuMES data.
 | Binary result, `CUMES001` | Versions 1–11 | Typed saved input in v3–8 and v10–11; full provenance and structural validation required |
 | Checkpoint, `CUMECKP1` | Versions 1–9 | Typed saved input in v2–6 and v8–9; no run provenance |
 | NetCDF / HDF5 result | Logical schema 1 | Required scientific structure, saved input, and run provenance |
+| Boozer binary, `MCBOOZ` | Versions 3–8 | Optional groups follow the stored version; source path retained |
+| Boozer NetCDF / HDF5 | Export only | Existing v3–v8 schemas and real-parity normalization |
 
 Binary v9 and checkpoint v7 used an obsolete JSON input extension. Explicit
 state-only reads recover their spectral state; complete reads reject their
@@ -63,3 +66,11 @@ from `ReadMode::STATE_ONLY`, which also reads any stored derived-field block.
 Byte inspection preserves every stored bit and does not check finiteness.
 Legacy files remain opt-in. Comparison tools retain responsibility for numerical
 acceptance and bitwise-equality policy.
+
+Boozer data types moved from magnetic-coordinate to this package in 0.2.
+magnetic-coordinate retains source aliases, but consumers must rebuild because
+the C++ ABI changed. Flux lists select Boozer v8; surface profiles select v7;
+older results keep their older schema. Binary re-encoding may round spectral
+parity pairs through the existing complex/real normalization. Sampled fields,
+profiles, angle maps and metadata remain exact. No mathematical transform or
+resampling occurs during container conversion.

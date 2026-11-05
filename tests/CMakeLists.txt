@@ -10,7 +10,7 @@ function(equilibrium_test_backends target)
   endif()
   if(EQUILIBRIUM_HAVE_HDF5)
     target_compile_definitions(${target} PRIVATE EQUILIBRIUM_HAVE_HDF5)
-    target_link_libraries(${target} PRIVATE HDF5::HDF5)
+    target_link_libraries(${target} PRIVATE ${EQUILIBRIUM_HDF5_TARGET})
   endif()
 endfunction()
 
@@ -42,9 +42,15 @@ function(equilibrium_add_test name source library sanitized)
 endfunction()
 
 set(codec_tests
-  host_io checkpoint asymmetric_io io_golden output_failure spectral_payload)
+  host_io checkpoint asymmetric_io io_golden output_failure spectral_payload
+  boozer_io)
 if(EQUILIBRIUM_HAVE_NETCDF OR EQUILIBRIUM_HAVE_HDF5)
-  list(APPEND codec_tests io_restart_offsets io_malformed_shapes)
+  list(APPEND codec_tests io_restart_offsets)
+  # Sparse-file fixtures with 2^40 extents require a native 64-bit filesystem.
+  # The standalone converter tests cover malformed Wasm inputs separately.
+  if(NOT EMSCRIPTEN)
+    list(APPEND codec_tests io_malformed_shapes)
+  endif()
 endif()
 
 equilibrium_add_test(equilibrium_contract contract.cpp equilibrium::io FALSE)
