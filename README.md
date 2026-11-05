@@ -42,7 +42,7 @@ For a source dependency, use a pinned release or commit with FetchContent:
 include(FetchContent)
 FetchContent_Declare(equilibrium_io
   GIT_REPOSITORY https://github.com/12ff54e/equilibrium-io.git
-  GIT_TAG v0.1.0)
+  GIT_TAG v0.2.0)
 FetchContent_MakeAvailable(equilibrium_io)
 target_link_libraries(analysis PRIVATE equilibrium::io)
 ```

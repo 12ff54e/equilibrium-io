@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.2.0
+## 0.2.0 — 2026-11-05
 
 - Own Boozer data records, v3–v8 binary reads, and binary/NetCDF/HDF5 exports.
   Consumers of the moved C++ types must rebuild. Boozer scientific-container
