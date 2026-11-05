@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "equilibrium-io"
+version = "0.1.0"
+description = "Readers for cuMES equilibrium files"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+license = {file = "LICENSE"}
+
+[project.optional-dependencies]
+netcdf = ["scipy"]
+hdf5 = ["h5py"]
+all = ["scipy", "h5py"]
+
+[tool.setuptools.packages.find]
+where = ["python"]

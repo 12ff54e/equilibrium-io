@@ -48,3 +48,17 @@ full-precision schema/value comparisons for ten NetCDF/HDF5 fixtures, covering
 symmetry, asymmetry, free-boundary provenance, and list profiles. cuMES retains
 its broader historical-reader and malformed-container suite; this repository
 runs the common record, conversion, and installed-package contracts on its own.
+
+## Analysis readers
+
+The Python `equilibrium_io.load_state` API retains the former cuMES plotting
+reader's tuple, family ordering, NumPy array layout, and input dictionaries.
+It does not import plotting modules. Format rejection raises `ValueError`;
+callers can catch errors instead of handling process termination.
+
+C++ spectral-payload inspection accepts a result header and its complete state
+payload without reading later fields or provenance. This is a distinct contract
+from `ReadMode::STATE_ONLY`, which also reads any stored derived-field block.
+Byte inspection preserves every stored bit and does not check finiteness.
+Legacy files remain opt-in. Comparison tools retain responsibility for numerical
+acceptance and bitwise-equality policy.

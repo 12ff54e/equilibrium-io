@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add an installable Python reader and its cross-language fixture tests.
+- Add spectral-only C++ reads that preserve exact payload bytes, and a
+  JavaScript module for scientific-payload ranges and digests.
+- Share codec target construction across native, sanitizer, and Wasm builds.
+
 - Move the cuMES codec regression tests into this repository: historical binary
   layouts, checkpoints, asymmetric provenance, malformed containers, and atomic
   publication failures. They run without cuMES or CUDA.

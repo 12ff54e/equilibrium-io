@@ -1,4 +1,6 @@
 option(EQUILIBRIUM_SANITIZER_TESTS "Build ASan/UBSan codec tests" OFF)
+option(EQUILIBRIUM_PYTHON_TESTS "Test the Python reader (requires NumPy and enabled codec extras)" OFF)
+option(EQUILIBRIUM_JS_TESTS "Test JavaScript payload inspection (requires Node)" OFF)
 
 # Tests that inspect or corrupt native containers need their C APIs too.
 function(equilibrium_test_backends target)
@@ -40,7 +42,7 @@ function(equilibrium_add_test name source library sanitized)
 endfunction()
 
 set(codec_tests
-  host_io checkpoint asymmetric_io io_golden output_failure)
+  host_io checkpoint asymmetric_io io_golden output_failure spectral_payload)
 if(EQUILIBRIUM_HAVE_NETCDF OR EQUILIBRIUM_HAVE_HDF5)
   list(APPEND codec_tests io_restart_offsets io_malformed_shapes)
 endif()
@@ -54,19 +56,8 @@ if(EQUILIBRIUM_SANITIZER_TESTS)
   if(EMSCRIPTEN OR NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     message(FATAL_ERROR "Sanitizer tests require a native GCC or Clang build")
   endif()
-  # Reuse the production source lists without exporting sanitizer flags.
-  add_library(equilibrium_binary_asan STATIC ${EQUILIBRIUM_BINARY_SOURCES})
-  target_link_libraries(equilibrium_binary_asan PUBLIC equilibrium::data)
-  add_library(equilibrium_io_asan STATIC
-    ../src/io.cpp ../src/writer_dispatch.cpp)
-  if(EQUILIBRIUM_HAVE_NETCDF)
-    target_sources(equilibrium_io_asan PRIVATE ../src/netcdf_writer.cpp)
-  endif()
-  if(EQUILIBRIUM_HAVE_HDF5)
-    target_sources(equilibrium_io_asan PRIVATE ../src/hdf5_writer.cpp)
-  endif()
-  equilibrium_test_backends(equilibrium_io_asan)
-  target_link_libraries(equilibrium_io_asan PUBLIC equilibrium_binary_asan)
+  equilibrium_add_binary_library(equilibrium_binary_asan)
+  equilibrium_add_io_library(equilibrium_io_asan equilibrium_binary_asan ${EQUILIBRIUM_CODEC_TARGETS})
   equilibrium_sanitize(equilibrium_binary_asan)
   equilibrium_sanitize(equilibrium_io_asan)
   equilibrium_add_test(equilibrium_contract_asan contract.cpp equilibrium_io_asan TRUE)
@@ -82,4 +73,24 @@ if(EQUILIBRIUM_STANDALONE AND NOT CMAKE_CROSSCOMPILING)
       -DBINARY_DIR=${PROJECT_BINARY_DIR}
       -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
       -P ${CMAKE_CURRENT_SOURCE_DIR}/installed_components.cmake)
+endif()
+
+if(EQUILIBRIUM_PYTHON_TESTS)
+  if(CMAKE_CROSSCOMPILING)
+    message(FATAL_ERROR "Python fixtures require a native build")
+  endif()
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME equilibrium_python
+    COMMAND ${CMAKE_COMMAND} -E env
+      PYTHONPATH=${PROJECT_SOURCE_DIR}/python
+      PYTHONPYCACHEPREFIX=${CMAKE_CURRENT_BINARY_DIR}/pycache
+      TMPDIR=${CMAKE_CURRENT_BINARY_DIR}
+      ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/test_state_io.py
+      $<TARGET_FILE:equilibrium_asymmetric_io>)
+endif()
+
+if(EQUILIBRIUM_JS_TESTS)
+  find_program(EQUILIBRIUM_NODE NAMES node nodejs REQUIRED)
+  add_test(NAME equilibrium_js
+    COMMAND ${EQUILIBRIUM_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/test_binary_payload.mjs)
 endif()

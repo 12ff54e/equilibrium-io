@@ -34,6 +34,7 @@ jobs:
           -DEQUILIBRIUM_USE_NETCDF=${{ matrix.netcdf }}
           -DEQUILIBRIUM_USE_HDF5=${{ matrix.hdf5 }}
           -DEQUILIBRIUM_SANITIZER_TESTS=${{ matrix.sanitizers }}
+          -DEQUILIBRIUM_JS_TESTS=ON
       - name: Build
         run: cmake --build build --parallel 2
       - name: Codec, record, and installed-consumer tests
@@ -63,3 +64,41 @@ jobs:
         run: cmake --build build --parallel 2
       - name: Binary and checkpoint tests in Node
         run: ctest --test-dir build --output-on-failure --no-tests=error
+
+  python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libnetcdf-dev libhdf5-dev
+      - name: Install the NumPy-only package
+        run: python3 -m pip install --target "$RUNNER_TEMP/python-only" .
+      - name: Build binary fixtures
+        run: |
+          cmake -S . -B build-binary -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DEQUILIBRIUM_USE_NETCDF=OFF -DEQUILIBRIUM_USE_HDF5=OFF
+          cmake --build build-binary --target equilibrium_asymmetric_io --parallel 2
+      - name: Installed binary reader without optional packages
+        run: |
+          source_dir="$PWD"
+          cd "$RUNNER_TEMP"
+          PYTHONPATH="$RUNNER_TEMP/python-only" python3 -S \
+            "$source_dir/tests/python/test_state_io.py" \
+            "$source_dir/build-binary/tests/equilibrium_asymmetric_io"
+      - name: Install scientific-container extras
+        run: python3 -m pip install --target "$RUNNER_TEMP/python-all" '.[all]'
+      - name: Build scientific fixtures
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target equilibrium_asymmetric_io --parallel 2
+      - name: Installed reader for all formats
+        run: |
+          source_dir="$PWD"
+          cd "$RUNNER_TEMP"
+          PYTHONPATH="$RUNNER_TEMP/python-all" python3 -S \
+            "$source_dir/tests/python/test_state_io.py" \
+            "$source_dir/build/tests/equilibrium_asymmetric_io"

@@ -53,6 +53,51 @@ add cuMES first and link its existing `equilibrium::data`, `equilibrium::binary`
 or `equilibrium::io` targets. Do not add another copy of the package to that
 build. Installed cuMES consumers reuse its `find_dependency(equilibrium_io)`.
 
+## Python readers
+
+Install from this checkout with `python3 -m pip install .`. Binary and checkpoint
+reads need only NumPy. Use `pip install '.[netcdf]'`, `'.[hdf5]'`, or `'.[all]'`
+for SciPy NetCDF and h5py HDF5 support. No cuMES or plotting package is required.
+
+```python
+from equilibrium_io import load_state
+ns, mnmax, families, input_params, name = load_state("equilibrium.bin")
+```
+
+`load_state` preserves the plotting reader's tuple and mode-major NumPy arrays.
+It requires saved input metadata. Format checks raise `ValueError` rather than
+terminating the process; ordinary file and truncated-struct errors remain
+catchable Python exceptions. The package reads cuMES formats only.
+
+## Spectral payload inspection
+
+`equilibrium/spectral_payload.hpp` exposes `read_spectral_payload(path)` and
+`read_spectral_state(path)` through `equilibrium::binary`. These inspect only
+the spectral portion of result binaries v1-v11. They accept missing or
+unsupported trailing metadata and do not require a derived-field block.
+`read_spectral_payload` returns the exact stored bytes, including signed zero
+and NaN payload bits; it does not decode and rewrite them. Legacy unversioned
+files require `allow_legacy=true` and an exact file size. The usual per-family
+resource cap applies. Use `read` or `read_binary` for complete equilibria and
+checkpoints.
+
+For browser diagnostics, `js/binary_payload.mjs` exports
+`scientificPayloadRanges(bytes)` and `digestScientificPayload(bytes)` for
+result binaries v8-v11 with derived fields. The latter uses Web Crypto SHA-256
+and excludes headers and provenance from its state and field digests. Import
+this module directly; it has no npm dependencies.
+
+## Alternate CMake toolchains
+
+Source consumers that need several compiler variants can include
+`cmake/EquilibriumTargets.cmake`. `equilibrium_add_binary_library(target)` builds
+the binary codecs; `equilibrium_add_io_library(target binary_target
+NETCDF_TARGET netcdf_target HDF5_TARGET hdf5_target)` adds the selected scientific
+codecs. Omit either dependency argument to disable that codec. These helpers
+use supplied targets without searching the host system. Consumers set thread,
+exception, and sanitizer flags on the resulting targets. Ordinary consumers
+should use the package's `equilibrium::binary` and `equilibrium::io` targets.
+
 ## Development and releases
 
 Run the tests with both codecs enabled, each enabled alone, and both disabled.
@@ -63,7 +108,10 @@ WebAssembly checks.
 The suite covers historical binary layouts, checkpoints, asymmetric input,
 malformed container shapes and restart offsets, and atomic publication failures.
 cuMES keeps its configuration adapter, device transfer, derived-field physics,
-solver/CLI, Python plotting, and browser integration tests.
+solver/CLI, plot rendering, and browser integration tests. Python reader tests
+and JavaScript payload tests live here. Set `EQUILIBRIUM_PYTHON_TESTS=ON` or
+`EQUILIBRIUM_JS_TESTS=ON` to include them in CTest; CI also tests installed Python
+packages outside the source tree, with NumPy alone and with all codec extras.
 
 Enable `EQUILIBRIUM_SANITIZER_TESTS=ON` to build ASan/UBSan copies of the codecs
 and their tests. These copies are not installed. CTest writes fixtures beneath
