@@ -45,9 +45,10 @@ failure after rename reports unconfirmed durability after replacement.
 
 The initial extraction passed byte comparisons for five binary fixtures and
 full-precision schema/value comparisons for ten NetCDF/HDF5 fixtures, covering
-symmetry, asymmetry, free-boundary provenance, and list profiles. cuMES retains
-its broader historical-reader and malformed-container suite; this repository
-runs the common record, conversion, and installed-package contracts on its own.
+symmetry, asymmetry, free-boundary provenance, and list profiles. This library
+now owns the historical-reader, malformed-container, codec, and installed-package
+regression suites. cuMES retains adapter, derived-field, solver, and browser
+integration checks.
 
 ## Analysis readers
 
