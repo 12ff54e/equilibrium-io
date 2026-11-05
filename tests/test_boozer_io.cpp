@@ -1,6 +1,7 @@
 #include "equilibrium/boozer_binary.hpp"
 #include "equilibrium/boozer_output.hpp"
 #include "equilibrium/io.hpp"
+#include "hdf5_failure.hpp"
 
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
 #include <csignal>
@@ -928,23 +929,50 @@ void test_publication_and_conversion() {
                "invalid result replaced destination");
         no_temporary();
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
-        const pid_t child = fork();
-        expect(child >= 0, "cannot fork write-failure test");
-        if (child == 0) {
-            std::signal(SIGXFSZ, SIG_IGN);
-            const rlimit limit{256, 256};
-            if (setrlimit(RLIMIT_FSIZE, &limit) != 0) _exit(2);
-            try {
-                equilibrium::write_boozer_output(path, result, input);
-            } catch (const std::exception&) { _exit(0); }
-            _exit(1);
+#ifdef EQUILIBRIUM_HAVE_HDF5
+        if (format == equilibrium::BoozerOutputFormat::HDF5) {
+            equilibrium::test::hdf5_write_failures(
+                path,
+                [&](const std::string& destination) {
+                    equilibrium::write_boozer_output(destination, result,
+                                                     input);
+                },
+                [&](const std::string& destination) {
+                    const hid_t file = H5Fopen(destination.c_str(),
+                                               H5F_ACC_RDONLY, H5P_DEFAULT);
+                    expect(file >= 0, "cannot reopen recovered Boozer file");
+                    const hid_t dataset = H5Dopen2(file, "B", H5P_DEFAULT);
+                    expect(dataset >= 0, "missing recovered Boozer field");
+                    std::vector<double> values(result.grid.b.size());
+                    const auto read =
+                        H5Dread(dataset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL,
+                                H5P_DEFAULT, values.data());
+                    H5Dclose(dataset);
+                    H5Fclose(file);
+                    expect(read >= 0 && values == result.grid.b,
+                           "recovered Boozer field changed");
+                });
+        } else
+#endif
+        {
+            const pid_t child = fork();
+            expect(child >= 0, "cannot fork write-failure test");
+            if (child == 0) {
+                std::signal(SIGXFSZ, SIG_IGN);
+                const rlimit limit{256, 256};
+                if (setrlimit(RLIMIT_FSIZE, &limit) != 0) _exit(2);
+                try {
+                    equilibrium::write_boozer_output(path, result, input);
+                } catch (const std::exception&) { _exit(0); }
+                _exit(1);
+            }
+            int status = 0;
+            expect(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+                       WEXITSTATUS(status) == 0,
+                   "write failure did not propagate");
+            expect(preserved(path), "write failure replaced destination");
+            no_temporary();
         }
-        int status = 0;
-        expect(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
-                   WEXITSTATUS(status) == 0,
-               "write failure did not propagate");
-        expect(preserved(path), "write failure replaced destination");
-        no_temporary();
 #endif
         std::filesystem::remove(path);
         std::filesystem::create_directory(path);

@@ -6,12 +6,13 @@
 // outcomes, full restart history, raw + folded boundary harmonics) with a
 // round-tripping reader.
 //
-// This TU (and only this TU) includes <hdf5.h>; it compiles under
+// This TU compiles under
 // EQUILIBRIUM_HAVE_HDF5, which is confined to the adapter library target.
 #include "equilibrium/reader.hpp"
 #include "equilibrium/record_validation.hpp"
 #include "equilibrium/writer.hpp"
 #include "equilibrium/writer_helpers.hpp"
+#include "hdf5_output.hpp"
 #include "internal_factories.hpp"
 #include "io_common.hpp"
 
@@ -33,25 +34,24 @@ constexpr const char* HALF_FIELD_NAMES[EquilibriumSnapshot::HALF_FIELD_COUNT] =
 constexpr const char* FULL_FIELD_NAMES[EquilibriumSnapshot::FULL_FIELD_COUNT] =
     {"jsups", "jsupu", "jsupv", "jsubs", "jsubu", "jsubv"};
 
+using io_detail::Hdf5Handle;
+
 // Write one scalar (or fixed-size string) attribute on the root group.
 herr_t put_attr(hid_t loc, const char* name, hid_t dtype, const void* val) {
-    hid_t sid = H5Screate(H5S_SCALAR);
-    if (sid < 0) { return -1; }
-    hid_t aid = H5Acreate2(loc, name, dtype, sid, H5P_DEFAULT, H5P_DEFAULT);
-    H5Sclose(sid);
-    if (aid < 0) { return -1; }
-    herr_t r = H5Awrite(aid, dtype, val);
-    H5Aclose(aid);
-    return r;
+    Hdf5Handle<H5Sclose> space(H5Screate(H5S_SCALAR));
+    if (space.get() < 0) return -1;
+    Hdf5Handle<H5Aclose> attr(
+        H5Acreate2(loc, name, dtype, space.get(), H5P_DEFAULT, H5P_DEFAULT));
+    if (attr.get() < 0) return -1;
+    if (H5Awrite(attr.get(), dtype, val) < 0) return -1;
+    return attr.close();
 }
 
 herr_t put_str_attr(hid_t loc, const char* name, const std::string& value) {
-    hid_t s1 = H5Tcopy(H5T_C_S1);
-    if (s1 < 0) return -1;
-    herr_t r0 = H5Tset_size(s1, value.size() + 1);
-    herr_t r1 = r0 >= 0 ? put_attr(loc, name, s1, value.c_str()) : -1;
-    H5Tclose(s1);
-    return r1;
+    Hdf5Handle<H5Tclose> type(H5Tcopy(H5T_C_S1));
+    if (type.get() < 0 || H5Tset_size(type.get(), value.size() + 1) < 0)
+        return -1;
+    return put_attr(loc, name, type.get(), value.c_str());
 }
 
 // RAII handle closer (reader-rank-hardening handoff §3): every opened
@@ -150,13 +150,10 @@ class Hdf5V1Writer final : public Writer {
             return Status("HDF5: malformed asymmetric input record");
         }
 
-        const std::string tmp = io_detail::temp_path_for(spec.path);
-        hid_t fid =
-            H5Fcreate(tmp.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-        if (fid < 0) return Status("HDF5 H5Fcreate failed for " + tmp);
+        io_detail::Hdf5Output output(spec.path);
+        const hid_t fid = output.get();
+        if (fid < 0) return Status("HDF5 H5Fcreate image failed");
         auto fail = [&](const std::string& msg) -> Status {
-            H5Fclose(fid);
-            remove(tmp.c_str());
             return Status("HDF5: " + msg);
         };
 #define H5_CHECK(expr, msg_)                            \
@@ -167,15 +164,16 @@ class Hdf5V1Writer final : public Writer {
         auto write_array = [&](const char* name, hid_t dtype, int nd,
                                const hsize_t* dims,
                                const void* data) -> herr_t {
-            hid_t sp = H5Screate_simple(nd, dims, nullptr);
-            if (sp < 0) { return -1; }
-            hid_t ds = H5Dcreate2(fid, name, dtype, sp, H5P_DEFAULT,
-                                  H5P_DEFAULT, H5P_DEFAULT);
-            H5Sclose(sp);
-            if (ds < 0) { return -1; }
-            herr_t r = H5Dwrite(ds, dtype, H5S_ALL, H5S_ALL, H5P_DEFAULT, data);
-            H5Dclose(ds);
-            return r;
+            Hdf5Handle<H5Sclose> space(H5Screate_simple(nd, dims, nullptr));
+            if (space.get() < 0) return -1;
+            Hdf5Handle<H5Dclose> dataset(H5Dcreate2(fid, name, dtype,
+                                                    space.get(), H5P_DEFAULT,
+                                                    H5P_DEFAULT, H5P_DEFAULT));
+            if (dataset.get() < 0) return -1;
+            if (H5Dwrite(dataset.get(), dtype, H5S_ALL, H5S_ALL, H5P_DEFAULT,
+                         data) < 0)
+                return -1;
+            return dataset.close();
         };
 
         if (snapshot.lasym()) {
@@ -228,32 +226,32 @@ class Hdf5V1Writer final : public Writer {
             if (dbuf.size() != snapshot.family_size()) {
                 return fail("family size mismatch");
             }
-            hid_t sp = H5Screate_simple(2, state_dims, nullptr);
-            if (sp < 0) return fail("H5Screate_simple");
-            hid_t ds = H5Dcreate2(fid, fam_names[c], H5T_NATIVE_DOUBLE, sp,
-                                  H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-            H5Sclose(sp);
-            if (ds < 0) return fail("H5Dcreate2");
-            hid_t fs = H5Dget_space(ds);
+            Hdf5Handle<H5Sclose> space(
+                H5Screate_simple(2, state_dims, nullptr));
+            if (space.get() < 0) return fail("H5Screate_simple");
+            Hdf5Handle<H5Dclose> dataset(
+                H5Dcreate2(fid, fam_names[c], H5T_NATIVE_DOUBLE, space.get(),
+                           H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+            if (dataset.get() < 0) return fail("H5Dcreate2");
+            Hdf5Handle<H5Sclose> file_space(H5Dget_space(dataset.get()));
+            if (file_space.get() < 0) return fail("H5Dget_space");
             const hsize_t mdim[1] = {(hsize_t)snapshot.ns};
+            Hdf5Handle<H5Sclose> memory_space(
+                H5Screate_simple(1, mdim, nullptr));
+            if (memory_space.get() < 0) return fail("H5Screate_simple");
             for (int m = 0; m < snapshot.mnmax; ++m) {
                 hsize_t start[2] = {0, (hsize_t)m};
                 hsize_t count[2] = {(hsize_t)snapshot.ns, 1};
-                H5_CHECK(H5Sselect_hyperslab(fs, H5S_SELECT_SET, start, nullptr,
-                                             count, nullptr),
+                H5_CHECK(H5Sselect_hyperslab(file_space.get(), H5S_SELECT_SET,
+                                             start, nullptr, count, nullptr),
                          "H5Sselect_hyperslab");
-                hid_t ms = H5Screate_simple(1, mdim, nullptr);
-                herr_t r = H5Dwrite(ds, H5T_NATIVE_DOUBLE, ms, fs, H5P_DEFAULT,
-                                    dbuf.data() + (size_t)m * snapshot.ns);
-                H5Sclose(ms);
-                if (r < 0) {
-                    H5Sclose(fs);
-                    H5Dclose(ds);
-                    return fail("H5Dwrite family");
-                }
+                H5_CHECK(
+                    H5Dwrite(dataset.get(), H5T_NATIVE_DOUBLE,
+                             memory_space.get(), file_space.get(), H5P_DEFAULT,
+                             dbuf.data() + (size_t)m * snapshot.ns),
+                    "H5Dwrite family");
             }
-            H5Sclose(fs);
-            H5Dclose(ds);
+            H5_CHECK(dataset.close(), "H5Dclose family");
         }
         if (snapshot.has_derived_fields()) {
             const hsize_t half_dims[3] = {
@@ -534,15 +532,8 @@ class Hdf5V1Writer final : public Writer {
             write_array("zbcs", H5T_NATIVE_DOUBLE, 2, bnd_dims, fb.zbcs.data()),
             "write zbcs");
 
-        if (H5Fclose(fid) < 0) {
-            remove(tmp.c_str());
-            return Status("HDF5 H5Fclose failed");
-        }
 #undef H5_CHECK
-        // Durable publication (completion-plan follow-up §3): the library
-        // owns the descriptor, so publish_library_file reopens the completed
-        // temp, checks fsync + close, then renames + directory-fsyncs.
-        const std::string err = io_detail::publish_library_file(tmp, spec.path);
+        const std::string err = output.publish();
         if (!err.empty()) return Status("HDF5 publish: " + err);
         return Status();
     }

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Require HDF5 1.14.6 or newer, including supplied codec targets and installed
+  consumers. Native `AUTO` builds skip older HDF5 libraries.
+- Build HDF5 output in memory before publishing it, so storage-write failures
+  preserve the destination, remove temporary files, and leave HDF5 usable.
+  Image extraction briefly requires two serialized images plus HDF5 caches.
+- Check HDF5 dataset and attribute closes and release handles on early exits.
+- Test repeated storage failures, resource cleanup, library shutdown, and a
+  later successful write for both state and Boozer output.
+
 ## 0.3.0 — 2026-11-05
 
 - Move the Python Boozer v3–v8 binary, NetCDF and HDF5 analysis readers from

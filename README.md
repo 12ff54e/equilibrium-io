@@ -20,6 +20,10 @@ default), `ON` (required), or `OFF`. `AUTO` skips unavailable libraries.
 Binary I/O always builds. `EQUILIBRIUM_BUILD_TOOLS` and `EQUILIBRIUM_BUILD_TESTS`
 default to ON for standalone builds and OFF when embedded.
 
+HDF5 requires version 1.14.6 or newer. `AUTO` skips older versions; `ON`
+rejects them. This minimum also applies to installed consumers and supplied
+HDF5 targets in `equilibrium_add_io_library`.
+
 An installed consumer selects one component:
 
 ```cmake
@@ -261,6 +265,13 @@ and missing codecs return errors. Writers publish through a temporary file
 in the destination directory. Failures before rename preserve the destination.
 A directory-sync error after rename means replacement occurred but durability
 could not be confirmed.
+
+HDF5 writers build a file image in memory, close HDF5, then write the image
+through the checked publication path. This keeps storage-write failures out
+of HDF5 cleanup, which can leave the library unusable even in newer versions.
+Image extraction briefly holds two serialized images plus HDF5 caches; one
+image remains during the disk write. Allow for this extra memory when writing
+large files. This protects against storage failures, not allocation failure.
 
 ```sh
 equilibrium-convert input.bin output.h5

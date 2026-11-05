@@ -1,8 +1,10 @@
 // Atomic publication and writer failure injection for every enabled codec.
+#include "equilibrium/io.hpp"
 #include "equilibrium/output_spec.hpp"
 #include "equilibrium/run_report.hpp"
 #include "equilibrium/writer.hpp"
 #include "equilibrium/writer_helpers.hpp"
+#include "hdf5_failure.hpp"
 #include "input_fixture.hpp"
 #include "test_support.hpp"
 
@@ -270,6 +272,41 @@ int main() {
     run_all<float>();
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
     run_publication_boundaries();
+#endif
+#if defined(EQUILIBRIUM_HAVE_HDF5) && defined(__linux__) && \
+    !defined(__EMSCRIPTEN__)
+    try {
+        hdf5_write_failures(
+            "test_state_storage_failure.h5",
+            [](const std::string& path) {
+                require_hdf5(write_via_host<double>(
+                                 path.c_str(), equilibrium::OutputFormat::HDF5),
+                             "state HDF5 write failed");
+            },
+            [](const std::string& path) {
+                // The reader probes optional datasets that may be absent.
+                H5E_auto2_t handler = nullptr;
+                void* handler_data = nullptr;
+                require_hdf5(
+                    H5Eget_auto2(H5E_DEFAULT, &handler, &handler_data) >= 0,
+                    "cannot save HDF5 error handler");
+                require_hdf5(H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr) >= 0,
+                             "cannot silence optional HDF5 probes");
+                const auto recovered = equilibrium::read(path);
+                require_hdf5(
+                    H5Eset_auto2(H5E_DEFAULT, handler, handler_data) >= 0,
+                    "cannot restore HDF5 error handler");
+                require_hdf5(recovered.has_value(),
+                             "cannot read recovered state HDF5 file");
+                const auto& state = recovered.value();
+                require_hdf5(state.ns == 5 && state.mnmax == 2 &&
+                                 state.families.size() == 6,
+                             "recovered state dimensions changed");
+                for (const auto& family : state.families)
+                    require_hdf5(family == std::vector<double>(10, 0.0),
+                                 "recovered state family changed");
+            });
+    } catch (const std::exception& error) { check(false, error.what()); }
 #endif
     return summary();
 }
