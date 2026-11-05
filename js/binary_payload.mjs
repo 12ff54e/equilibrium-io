@@ -37,13 +37,13 @@ export function scientificPayloadRanges(input) {
   const end = spectralEnd + 8 + product(7 * (ns - 1) + 6 * ns, ntheta, nzeta, 8);
   if (!Number.isSafeInteger(end) || end > bytes.length)
     throw new RangeError('Truncated scientific output');
-  return {version, ns, mnmax, ntheta, nzeta, scientificBytes: end,
+  return {version, ns, mnmax, components, ntheta, nzeta, scientificBytes: end,
     stateRange: [start, spectralEnd], fieldRange: [spectralEnd + 8, end]};
 }
 
 export async function digestScientificPayload(input) {
   const bytes = byteView(input);
-  const {stateRange, fieldRange, ...metadata} = scientificPayloadRanges(bytes);
+  const {stateRange, fieldRange, components, ...metadata} = scientificPayloadRanges(bytes);
   const digest = async ([begin, end]) => Array.from(new Uint8Array(
     await globalThis.crypto.subtle.digest('SHA-256', bytes.subarray(begin, end))))
     .map(value => value.toString(16).padStart(2, '0')).join('');

@@ -24,9 +24,11 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 for (const version of [8, 9, 10, 11]) {
   const {bytes, start, stateSize, fieldSize} = fixture(version, version >= 9 ? 12 : 6);
   const ranges = scientificPayloadRanges(bytes);
+  assert.equal(ranges.components, version >= 9 ? 12 : 6);
   assert.deepEqual(ranges.stateRange, [start, start + stateSize]);
   assert.deepEqual(ranges.fieldRange, [start + stateSize + 8, bytes.length - 16]);
   const digest = await digestScientificPayload(bytes);
+  assert(!Object.hasOwn(digest, 'components')); // Preserve the existing digest record.
   assert.equal(digest.state, hash(new Uint8Array(stateSize).fill(0xa5)));
   assert.equal(digest.fields, hash(new Uint8Array(fieldSize).fill(0x5a)));
   bytes.fill(0xff, bytes.length - 16); // Provenance cannot affect the digest.
