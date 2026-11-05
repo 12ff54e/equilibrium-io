@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "equilibrium-io"
-version = "0.2.0"
-description = "Readers for cuMES equilibrium files"
+version = "0.3.0"
+description = "Readers for cuMES equilibrium and Boozer files"
 requires-python = ">=3.9"
 dependencies = ["numpy"]
 license = {file = "LICENSE"}

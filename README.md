@@ -73,7 +73,7 @@ The [Boozer v8 contract](docs/boozer-output-v8.md) links the preceding schemas.
 The binary component reads Boozer v3–v8 and provides `write_boozer_binary`.
 The `io` component adds suffix dispatch and NetCDF/HDF5 export. `convert` and
 `equilibrium-convert` recognize native equilibria and Boozer binaries. Boozer
-NetCDF/HDF5 input is not supported. Writers retain optional groups and source
+NetCDF/HDF5 input is not supported by the C++ API. Writers retain optional groups and source
 provenance; no absent group is filled with invented values.
 
 ## Standalone WebAssembly converter
@@ -125,7 +125,24 @@ ns, mnmax, families, input_params, name = load_state("equilibrium.bin")
 `load_state` preserves the plotting reader's tuple and mode-major NumPy arrays.
 It requires saved input metadata. Format checks raise `ValueError` rather than
 terminating the process; ordinary file and truncated-struct errors remain
-catchable Python exceptions. The package reads cuMES formats only.
+catchable Python exceptions. `load_state` reads native cuMES formats only.
+
+The Python API also reads the geometry and field-strength subset of Boozer
+v3–v8 binary, NetCDF and HDF5 files:
+
+```python
+from equilibrium_io import load_boozer
+data = load_boozer("boozer.bin")
+print(data.s, data.iota, data.b.shape)
+```
+
+`BoozerData` contains real Fourier geometry families and `b` in
+`[surface, zeta, theta]` order. Its `alpha` property is the source field-period
+angle; `theta_b` is the Boozer poloidal angle. This analysis API does not retain
+all optional records and cannot rewrite a complete file without data loss.
+Malformed files raise `ValueError`; filesystem errors raise `OSError`.
+Rendering and coordinate-grid construction belong to the plotting consumer.
+The Python reader needs the same optional codec extras listed above.
 
 ## Spectral payload inspection
 

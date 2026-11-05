@@ -86,6 +86,12 @@ if(EQUILIBRIUM_PYTHON_TESTS)
     message(FATAL_ERROR "Python fixtures require a native build")
   endif()
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME equilibrium_python_boozer
+    COMMAND ${CMAKE_COMMAND} -E env
+      PYTHONPATH=${PROJECT_SOURCE_DIR}/python
+      PYTHONPYCACHEPREFIX=${CMAKE_CURRENT_BINARY_DIR}/pycache
+      TMPDIR=${CMAKE_CURRENT_BINARY_DIR}
+      ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/test_boozer_io.py)
   add_test(NAME equilibrium_python
     COMMAND ${CMAKE_COMMAND} -E env
       PYTHONPATH=${PROJECT_SOURCE_DIR}/python

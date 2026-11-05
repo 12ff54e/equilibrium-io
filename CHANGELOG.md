@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — 0.3.0
+
+- Move the Python Boozer v3–v8 binary, NetCDF and HDF5 analysis readers from
+  cuMES into this package. `load_boozer` returns geometry, iota and field
+  strength; it does not retain every optional record for lossless rewriting.
+- Raise ordinary Python exceptions in the library. Plotting applications
+  handle command-line exits.
+
 ## 0.2.0 — 2026-11-05
 
 - Own Boozer data records, v3–v8 binary reads, and binary/NetCDF/HDF5 exports.

@@ -95,6 +95,7 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/python-only" python3 -S \
             "$source_dir/tests/python/test_state_io.py" \
             "$source_dir/build-binary/tests/equilibrium_asymmetric_io"
+          PYTHONPATH="$RUNNER_TEMP/python-only" python3 -S "$source_dir/tests/python/test_boozer_io.py"
       - name: Install scientific-container extras
         run: python3 -m pip install --target "$RUNNER_TEMP/python-all" '.[all]'
       - name: Build scientific fixtures
@@ -108,3 +109,4 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/python-all" python3 -S \
             "$source_dir/tests/python/test_state_io.py" \
             "$source_dir/build/tests/equilibrium_asymmetric_io"
+          PYTHONPATH="$RUNNER_TEMP/python-all" python3 -S "$source_dir/tests/python/test_boozer_io.py"
