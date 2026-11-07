@@ -9,6 +9,7 @@
 #include "equilibrium/checked_size.hpp"
 #include "equilibrium/equilibrium_snapshot.hpp"
 #include "equilibrium/input_params.hpp"
+#include "equilibrium/read_request.hpp"
 #include "equilibrium/writer_helpers.hpp"
 
 #include <array>
@@ -218,7 +219,8 @@ inline bool write_derived_fields(FILE* fp, const SnapshotView& snapshot) {
 inline bool read_derived_fields(FILE* fp,
                                 EquilibriumSnapshot& snapshot,
                                 std::string& reason,
-                                bool load = true) {
+                                bool load = true,
+                                const ReadRequest* request = nullptr) {
     std::int32_t ntheta = 0, nzeta = 0;
     if (!read_i32(fp, ntheta) || !read_i32(fp, nzeta)) {
         reason = "truncated derived-field dimensions";
@@ -262,7 +264,13 @@ inline bool read_derived_fields(FILE* fp,
     if (!load) return skip_bytes(fp, *bytes);
     snapshot.ntheta = ntheta;
     snapshot.nzeta = nzeta;
-    for (auto& field : snapshot.half_fields) {
+    for (std::size_t i = 0; i < snapshot.half_fields.size(); ++i) {
+        auto& field = snapshot.half_fields[i];
+        if (request &&
+            (*request)[half_field_quantity(i)] == Requirement::IGNORED) {
+            if (!skip_bytes(fp, *half * sizeof(double))) return false;
+            continue;
+        }
         field.resize(*half);
         if (!read_f64_array(fp, field)) {
             reason = "truncated half-grid field";
@@ -270,6 +278,11 @@ inline bool read_derived_fields(FILE* fp,
         }
     }
     for (auto& field : snapshot.full_fields) {
+        if (request &&
+            (*request)[Quantity::CURRENT_DENSITY] == Requirement::IGNORED) {
+            if (!skip_bytes(fp, *full * sizeof(double))) return false;
+            continue;
+        }
         field.resize(*full);
         if (!read_f64_array(fp, field)) {
             reason = "truncated full-grid field";

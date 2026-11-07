@@ -1,5 +1,6 @@
 #include "equilibrium/boozer_binary.hpp"
 #include "equilibrium/boozer_output.hpp"
+#include "equilibrium/boozer_validation.hpp"
 #include "equilibrium/io.hpp"
 #include "hdf5_failure.hpp"
 
@@ -1115,7 +1116,7 @@ void test_selected_reads() {
             !loaded.result.has_profiles() && loaded.result.has_tracing() &&
                 loaded.result.tracing->pflux_type == "list" &&
                 loaded.result.read_diagnostics[G::PROFILES].availability ==
-                    A::INVALID &&
+                    A::PARTIAL &&
                 !loaded.result.read_diagnostics[G::PROFILES].diagnostic.empty(),
             "invalid optional profiles affected required tracing");
         options.groups[G::PROFILES] = R::REQUIRED;
@@ -1140,7 +1141,7 @@ void test_selected_reads() {
                    loaded.result.magnetic_data()->get().fields ==
                        original.tracing->magnetic->fields &&
                    loaded.result.read_diagnostics[G::TRACING].availability ==
-                       A::INVALID,
+                       A::PARTIAL,
                "optional tracing corrupted independent magnetic group");
         options.groups[G::TRACING] = R::IGNORED;
         loaded = read_boozer_binary(path, options);
@@ -1178,11 +1179,170 @@ void test_selected_reads() {
     std::filesystem::remove(path);
 }
 
+void test_quantity_reads() {
+    using namespace equilibrium;
+    using Q = Quantity;
+    using R = Requirement;
+    auto original = with_tracing(make_asymmetric_result());
+    with_magnetic(original);
+    with_profiles(original);
+    const std::filesystem::path path = "boozer-quantities.bin";
+    write_boozer_binary(path, original, "quantity-fixture");
+    std::ifstream input(path, std::ios::binary);
+    std::string encoded{std::istreambuf_iterator<char>(input), {}};
+    input.close();
+    const auto integer = [&](std::size_t offset) {
+        std::uint32_t value = 0;
+        for (int i = 0; i < 4; ++i)
+            value |= static_cast<std::uint32_t>(
+                         static_cast<unsigned char>(encoded[offset + i]))
+                     << (8 * i);
+        return value;
+    };
+    std::size_t start = 12;
+    for (int i = 0; i < 3; ++i) start += 4 + integer(start);
+    start += 14 * 4 + 8;  // Header integers and resonance tolerance.
+    const auto surfaces = original.s.size();
+    const auto modes = static_cast<std::size_t>(original.spectrum.mmax + 1) *
+                       (original.spectrum.nmax + 1);
+    const auto coefficients = start + 2 * surfaces * 8 + 2 * modes * 4;
+    const std::string tracing_end = "not Boozer axis values";
+    const auto tracing = encoded.find(tracing_end) + tracing_end.size();
+    const std::string profiles_end =
+        "all profiles share the non-axis s/iota grid";
+    const auto pressure = encoded.find(profiles_end) + profiles_end.size();
+    expect(tracing < encoded.size() && pressure < encoded.size(),
+           "fixture convention offsets");
+    const auto axis_s = tracing + 4 + 8 + integer(tracing) * 8 +
+                        2 * original.source_ns * 8 +
+                        4 * (original.source_ntor + 1) * 8;
+    auto corrupt = encoded;
+    const auto nan = [&](std::string& bytes, std::size_t offset) {
+        for (int i = 0; i < 8; ++i)
+            bytes[offset + i] =
+                static_cast<char>(UINT64_C(0x7ff8000000000000) >> (8 * i));
+    };
+    nan(corrupt, coefficients + 4 * surfaces * modes * 8);  // Spectral nu.
+    nan(corrupt, axis_s);
+    nan(corrupt, pressure);
+    corrupt.replace(tracing + 4, 8, 8, '\0');  // Unused phiedge.
+    const auto put = [&](const std::string& bytes) {
+        std::ofstream(path, std::ios::binary).write(bytes.data(), bytes.size());
+    };
+    put(corrupt);
+    BoozerReadOptions options;
+    options.groups = {};
+    for (auto q :
+         {Q::GEOMETRY, Q::ROTATIONAL_TRANSFORM, Q::FLUX_DERIVATIVES,
+          Q::MAGNETIC_JACOBIAN, Q::CONTRAVARIANT_FIELD, Q::COVARIANT_FIELD,
+          Q::TOROIDAL_SHIFT, Q::B2_JACOBIAN, Q::SURFACE_CURRENTS})
+        options.groups[q] = R::REQUIRED;
+    options.groups[Q::PRESSURE] = R::OPTIONAL;
+    for (auto storage : {SpectrumStorage::REAL, SpectrumStorage::COMPLEX,
+                         SpectrumStorage::BOTH}) {
+        options.spectrum = storage;
+        auto loaded = read_boozer_binary(path, options);
+        const auto& data = loaded.result;
+        expect(data.has_geometry() && !data.has_quantity(Q::SPECTRAL_SHIFT) &&
+                   data.spectrum.nu.empty(),
+               "partial spectral representation");
+        expect(!data.has_profiles() && data.surface_currents() &&
+                   data.surface_currents()->i.data() ==
+                       data.profiles->current_i.data() &&
+                   data.profiles->current_i == original.profiles->current_i,
+               "invalid pressure discarded usable currents");
+        expect(data.read_diagnostics[Q::PRESSURE].availability ==
+                       Availability::INVALID &&
+                   data.read_diagnostics[DataGroup::PROFILES].availability ==
+                       Availability::PARTIAL,
+               "partial profile diagnostics");
+        expect(as_view(data).read_diagnostics[Q::PRESSURE].availability ==
+                   Availability::INVALID,
+               "borrowed view lost read diagnostics");
+        expect(data.tracing->aphi.empty() &&
+                   data.tracing->axis_half_fields[0].empty() &&
+                   data.grid.b.empty() && data.grid.sqrtg_b.empty() &&
+                   data.grid.source_theta_shift.empty(),
+               "ignored quantities allocated numerical arrays");
+        const auto field = data.contravariant_field().value();
+        expect(
+            field.components[0].data() ==
+                    data.tracing->magnetic->fields[1].data() &&
+                field.grid.index(1, 2, 3) ==
+                    static_cast<std::size_t>(
+                        (original.grid.nzeta + 3) * original.grid.ntheta + 2),
+            "Boozer field view must borrow theta-fast arrays");
+        const auto flux = data.flux_derivatives().value();
+        expect(flux.toroidal.data() ==
+                       data.tracing->toroidal_flux_derivative.data() &&
+                   flux.s(1) == .5,
+               "signed source flux view");
+        const auto normalized = data.b2_jacobian().value();
+        expect(normalized.values.data() == data.grid.b2j00.data() &&
+                   normalized[0] ==
+                       original.grid.b2j00[0] / BOOZER_ANGULAR_INTEGRAL,
+               "normalized legacy quantity must borrow original coefficients");
+        if (data.real_spectrum) {
+            expect(data.real_spectrum->numnsc.empty(),
+                   "REAL allocated ignored shift coefficients");
+            const auto geometry = data.geometry_coefficients().value();
+            expect(geometry.grid.index(1, 1, 1) == 7 &&
+                       geometry.rcc.data() == data.real_spectrum->rmncc.data(),
+                   "Boozer geometry layout view");
+        }
+        bool failed = false;
+        try {
+            write_boozer_binary("boozer-partial.bin", data, "partial");
+        } catch (const std::invalid_argument&) { failed = true; }
+        expect(failed, "complete writer accepted partial quantities");
+    }
+    nan(corrupt, start + surfaces * 8);
+    put(corrupt);
+    options.groups[Q::ROTATIONAL_TRANSFORM] = R::IGNORED;
+    auto loaded = read_boozer_binary(path, options);
+    expect(loaded.result.iota.empty() && loaded.result.surface_currents(),
+           "ignored invalid iota blocked independent quantities");
+    options.groups[Q::ROTATIONAL_TRANSFORM] = R::OPTIONAL;
+    loaded = read_boozer_binary(path, options);
+    expect(loaded.result.iota.empty() && loaded.result.surface_currents() &&
+               loaded.result.read_diagnostics[Q::ROTATIONAL_TRANSFORM]
+                       .availability == Availability::INVALID,
+           "optional invalid iota blocked independent quantities");
+    options.groups[Q::ROTATIONAL_TRANSFORM] = R::REQUIRED;
+    bool failed = false;
+    try {
+        read_boozer_binary(path, options);
+    } catch (const std::exception&) { failed = true; }
+    expect(failed, "required invalid iota accepted");
+    put(encoded);
+    BoozerReadOptions complete;
+    complete.spectrum = SpectrumStorage::REAL;
+    auto implicit = read_boozer_binary(path, complete).result;
+    implicit.real_spectrum->m.clear();
+    implicit.real_spectrum->n.clear();
+    expect(bool(validate_quantity(as_view(implicit), Q::GEOMETRY)),
+           "borrowed canonical geometry requires serialized mode arrays");
+    failed = false;
+    try {
+        write_boozer_binary(path, implicit, "implicit modes");
+    } catch (const std::invalid_argument&) { failed = true; }
+    expect(failed, "writer emitted missing real mode arrays");
+    auto vectors = original;
+    auto& f = vectors.tracing->magnetic->fields;
+    f[0].clear();
+    for (int c = 1; c <= 3; ++c)
+        for (std::size_t i = 0; i < f[c].size(); ++i) f[c + 3][i] = -f[c][i];
+    expect(!validate_consistency(as_view(vectors), BoozerConsistency::MAGNETIC),
+           "inconsistent magnetic vectors accepted without Jacobian");
+    std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main() {
     try {
         test_selected_reads();
+        test_quantity_reads();
         test_round_trip();
         test_flux_list_round_trip();
         for (bool magnetic_fields : {false, true}) {

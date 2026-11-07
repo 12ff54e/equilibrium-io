@@ -29,6 +29,7 @@ struct BoozerReadOptions {
         ReadRequest request;
         request[DataGroup::GEOMETRY] = Requirement::REQUIRED;
         request[DataGroup::STRENGTH] = Requirement::REQUIRED;
+        request[Quantity::ROTATIONAL_TRANSFORM] = Requirement::REQUIRED;
         for (auto group :
              {DataGroup::TRACING, DataGroup::MAGNETIC, DataGroup::PROFILES})
             request[group] = Requirement::OPTIONAL;

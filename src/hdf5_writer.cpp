@@ -767,10 +767,10 @@ class Hdf5V1Reader final : public Reader {
                 }
                 return false;
             };
-            const auto wants = [&](DataGroup group) {
+            const auto wants = [&](auto group) {
                 return !selected || selected->selection.wants(group);
             };
-            const auto decode_group = [&](DataGroup group, auto present,
+            const auto decode_group = [&](auto group, auto present,
                                           auto decode) {
                 if (!wants(group)) return false;
                 const bool exists = present();
@@ -790,161 +790,122 @@ class Hdf5V1Reader final : public Reader {
             snapshot.source_version = 1;
             snapshot.ns = ns;
             snapshot.mnmax = mnmax;
-            if (!decode_group(
-                    DataGroup::GEOMETRY, [] { return true; },
-                    [&]() -> Status {
-                        auto fail = group_fail;
-                        const char* fam_names[12] = {"rmncc", "zmnsc", "lmnsc",
-                                                     "rmnss", "zmncs", "lmncs",
-                                                     "rmnsc", "zmncc", "lmncc",
-                                                     "rmncs", "zmnss", "lmnss"};
-                        int asymmetric_families = 0;
-                        for (int c = 6; c < 12; ++c)
-                            if (H5Lexists(fid, fam_names[c], H5P_DEFAULT) > 0)
-                                ++asymmetric_families;
-                        if (asymmetric_families != 0 &&
-                            asymmetric_families != 6)
-                            return fail(
-                                "incomplete asymmetric spectral families");
-                        if (asymmetric_families)
-                            snapshot.families.resize(
-                                EquilibriumSnapshot::ASYMMETRIC_COUNT);
-
-                        // The file layout is [surface, mode] (C order over the
-                        // (ns, mnmax) dataspace) while the snapshot is
-                        // mode-major (index = m*ns + j). A whole-slab read must
-                        // therefore TRANSPOSE — the exact
-                        // declaration/data-order trap the blueprint pins
-                        // (completion plan step 2.3). The writers use per-mode
-                        // hyperslabs, which is the transpose-aware mirror
-                        // image.
-                        std::vector<double> tmp(*n_opt);
-                        for (int c = 0; c < snapshot.components(); ++c) {
-                            // EVERY family must independently satisfy rank 2 +
-                            // the exact [ns, mnmax] extents + a
-                            // double-compatible type before the read
-                            // (reader-rank-hardening §3): rmncc alone no longer
-                            // vouches for the other five.
-                            H5Closer ds(
-                                H5Dopen2(fid, fam_names[c], H5P_DEFAULT));
-                            if (ds.get() < 0) {
-                                return fail("missing state dataset (" +
-                                            std::string(fam_names[c]) + ")");
-                            }
-                            hsize_t fam_dims[2] = {0, 0};
-                            if (!get_dim_exact(fam_names[c], 2, fam_dims) ||
-                                fam_dims[0] != state_dims[0] ||
-                                fam_dims[1] != state_dims[1]) {
-                                return fail("malformed state dataset (" +
-                                            std::string(fam_names[c]) + ")");
-                            }
-                            if (!dataset_is_double(ds.get())) {
-                                return fail("malformed state dataset type (" +
-                                            std::string(fam_names[c]) + ")");
-                            }
-                            H5Closer sp(
-                                H5Screate_simple(2, state_dims, nullptr));
-                            if (sp.get() < 0) return fail("state read failed");
-                            const herr_t r =
-                                H5Dread(ds.get(), H5T_NATIVE_DOUBLE, sp.get(),
-                                        H5S_ALL, H5P_DEFAULT, tmp.data());
-                            if (r < 0) return fail("state read failed");
-                            snapshot.families[c].resize(*n_opt);
-                            for (int m = 0; m < mnmax; ++m) {
-                                for (int j = 0; j < ns; ++j) {
-                                    snapshot.families[c][(size_t)m * ns + j] =
-                                        tmp[(size_t)j * mnmax + m];
-                                }
-                            }
-                        }
-
-                        return {};
-                    }))
-                snapshot.families.clear();
-            if (wants(DataGroup::FIELDS)) {
-                int present_fields = 0;
-                for (const char* name : HALF_FIELD_NAMES) {
-                    const htri_t present = H5Lexists(fid, name, H5P_DEFAULT);
-                    if (present < 0)
-                        throw std::runtime_error(
-                            "cannot inspect field datasets");
-                    present_fields += present > 0 ? 1 : 0;
-                }
-                for (const char* name : FULL_FIELD_NAMES) {
-                    const htri_t present = H5Lexists(fid, name, H5P_DEFAULT);
-                    if (present < 0)
-                        throw std::runtime_error(
-                            "cannot inspect field datasets");
-                    present_fields += present > 0 ? 1 : 0;
-                }
-
+            const char* fam_names[12] = {"rmncc", "zmnsc", "lmnsc", "rmnss",
+                                         "zmncs", "lmncs", "rmnsc", "zmncc",
+                                         "lmncc", "rmncs", "zmnss", "lmnss"};
+            const auto dataset_present = [&](const char* name) {
+                return H5Lexists(fid, name, H5P_DEFAULT) > 0;
+            };
+            // Symmetry describes the source layout even if only one spectral
+            // quantity is requested. Each requested family is checked below.
+            for (int c = 6; c < 12; ++c)
+                if (dataset_present(fam_names[c])) snapshot.families.resize(12);
+            for (auto q : group_quantities(DataGroup::GEOMETRY)) {
+                bool present = false;
+                for (int c = 0; c < snapshot.components(); ++c)
+                    if (native_family_quantity(c) == q)
+                        present = present || dataset_present(fam_names[c]);
                 if (!decode_group(
-                        DataGroup::FIELDS, [&] { return present_fields != 0; },
+                        q, [&] { return present; },
                         [&]() -> Status {
-                            auto fail = group_fail;
-                            if (present_fields != 0) {
-                                constexpr int EXPECTED_FIELDS =
-                                    static_cast<int>(
-                                        EquilibriumSnapshot::HALF_FIELD_COUNT) +
-                                    static_cast<int>(
-                                        EquilibriumSnapshot::FULL_FIELD_COUNT);
-                                if (present_fields != EXPECTED_FIELDS) {
-                                    return fail(
-                                        "incomplete derived-field datasets");
-                                }
-                                hsize_t half_dims[3] = {0, 0, 0};
-                                hsize_t full_dims[3] = {0, 0, 0};
-                                if (!get_dim_exact(HALF_FIELD_NAMES[0], 3,
-                                                   half_dims) ||
-                                    !get_dim_exact(FULL_FIELD_NAMES[0], 3,
-                                                   full_dims) ||
-                                    half_dims[0] !=
-                                        static_cast<hsize_t>(ns - 1) ||
-                                    full_dims[0] != static_cast<hsize_t>(ns) ||
-                                    half_dims[1] != full_dims[1] ||
-                                    half_dims[2] != full_dims[2] ||
-                                    half_dims[1] < 1 || half_dims[2] < 1 ||
-                                    half_dims[1] > INT_MAX ||
-                                    half_dims[2] > INT_MAX) {
-                                    return fail(
-                                        "malformed derived-field dimensions");
-                                }
-                                snapshot.nzeta = static_cast<int>(half_dims[1]);
-                                snapshot.ntheta =
-                                    static_cast<int>(half_dims[2]);
-                                for (int c = 0;
-                                     c < EquilibriumSnapshot::HALF_FIELD_COUNT;
-                                     ++c) {
-                                    if (!get_dbl_field(
-                                            HALF_FIELD_NAMES[c], half_dims,
-                                            snapshot.half_fields[c])) {
-                                        return fail(
-                                            "malformed half-grid field dataset "
-                                            "(" +
-                                            std::string(HALF_FIELD_NAMES[c]) +
-                                            ")");
-                                    }
-                                }
-                                for (int c = 0;
-                                     c < EquilibriumSnapshot::FULL_FIELD_COUNT;
-                                     ++c) {
-                                    if (!get_dbl_field(
-                                            FULL_FIELD_NAMES[c], full_dims,
-                                            snapshot.full_fields[c])) {
-                                        return fail(
-                                            "malformed full-grid field dataset "
-                                            "(" +
-                                            std::string(FULL_FIELD_NAMES[c]) +
-                                            ")");
-                                    }
-                                }
+                            for (int c = 0; c < snapshot.components(); ++c) {
+                                if (native_family_quantity(c) != q) continue;
+                                hsize_t dims[2]{};
+                                H5Closer ds(
+                                    H5Dopen2(fid, fam_names[c], H5P_DEFAULT));
+                                if (ds.get() < 0 ||
+                                    !get_dim_exact(fam_names[c], 2, dims) ||
+                                    dims[0] != state_dims[0] ||
+                                    dims[1] != state_dims[1] ||
+                                    !dataset_is_double(ds.get()))
+                                    return Status(
+                                        "missing/malformed state family " +
+                                        std::string(fam_names[c]));
+                                std::vector<double> tmp(*n_opt);
+                                if (H5Dread(ds.get(), H5T_NATIVE_DOUBLE,
+                                            H5S_ALL, H5S_ALL, H5P_DEFAULT,
+                                            tmp.data()) < 0)
+                                    return Status(
+                                        "cannot read spectral family");
+                                snapshot.families[c].resize(*n_opt);
+                                for (int m = 0; m < mnmax; ++m)
+                                    for (int j = 0; j < ns; ++j)
+                                        snapshot.families
+                                            [c]
+                                            [static_cast<std::size_t>(m) * ns +
+                                             j] =
+                                            tmp[static_cast<std::size_t>(j) *
+                                                    mnmax +
+                                                m];
                             }
-
+                            return {};
+                        }))
+                    for (std::size_t c = 0; c < snapshot.families.size(); ++c)
+                        if (native_family_quantity(c) == q)
+                            snapshot.families[c].clear();
+            }
+            if (!selected) {
+                std::size_t present = 0;
+                for (const auto* name : HALF_FIELD_NAMES)
+                    present += dataset_present(name);
+                for (const auto* name : FULL_FIELD_NAMES)
+                    present += dataset_present(name);
+                if (present && present != std::size(HALF_FIELD_NAMES) +
+                                              std::size(FULL_FIELD_NAMES))
+                    return fail("partial derived-field block");
+            }
+            for (auto q : group_quantities(DataGroup::FIELDS)) {
+                if (!wants(q)) continue;
+                const bool full = q == Quantity::CURRENT_DENSITY;
+                const auto* names = full ? FULL_FIELD_NAMES : HALF_FIELD_NAMES;
+                const auto count = full ? std::size(FULL_FIELD_NAMES)
+                                        : std::size(HALF_FIELD_NAMES);
+                bool present = false;
+                for (std::size_t c = 0; c < count; ++c)
+                    if (full || half_field_quantity(c) == q)
+                        present = present || dataset_present(names[c]);
+                if (decode_group(
+                        q, [&] { return present; },
+                        [&]() -> Status {
+                            if (!present) return {};
+                            const std::size_t first =
+                                full || q == Quantity::MAGNETIC_JACOBIAN ? 0
+                                : q == Quantity::CONTRAVARIANT_FIELD     ? 1
+                                                                         : 4;
+                            hsize_t dims[3]{};
+                            if (!get_dim_exact(names[first], 3, dims) ||
+                                dims[0] !=
+                                    static_cast<hsize_t>(ns - (full ? 0 : 1)) ||
+                                dims[1] < 1 || dims[2] < 1 ||
+                                dims[1] > INT_MAX || dims[2] > INT_MAX)
+                                return Status("malformed field dimensions");
+                            if (!selected && snapshot.ntheta &&
+                                (snapshot.ntheta != static_cast<int>(dims[2]) ||
+                                 snapshot.nzeta != static_cast<int>(dims[1])))
+                                return Status("inconsistent field grids");
+                            snapshot.ntheta = static_cast<int>(dims[2]);
+                            snapshot.nzeta = static_cast<int>(dims[1]);
+                            for (std::size_t c = 0; c < count; ++c) {
+                                if (!full && half_field_quantity(c) != q)
+                                    continue;
+                                auto& values = full ? snapshot.full_fields[c]
+                                                    : snapshot.half_fields[c];
+                                if (!get_dbl_field(names[c], dims, values))
+                                    return Status("missing/malformed field " +
+                                                  std::string(names[c]));
+                            }
                             return {};
                         })) {
-                    snapshot.ntheta = snapshot.nzeta = 0;
-                    for (auto& values : snapshot.half_fields) values.clear();
-                    for (auto& values : snapshot.full_fields) values.clear();
+                    if (selected) selected->record_field_shape(q, snapshot);
+                } else {
+                    if (full)
+                        for (auto& values : snapshot.full_fields)
+                            values.clear();
+                    else
+                        for (std::size_t c = 0; c < snapshot.half_fields.size();
+                             ++c)
+                            if (half_field_quantity(c) == q)
+                                snapshot.half_fields[c].clear();
                 }
             }
             if (report) {

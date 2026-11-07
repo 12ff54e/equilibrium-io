@@ -276,12 +276,18 @@ Result<Equilibrium> read_native_binary(const std::string& path,
             owner.read_diagnostics = std::move(selection.diagnostics);
             return std::move(owner);
         };
-        const auto check = [&](DataGroup group, bool present) {
+        const auto check = [&](auto group, bool present) {
             if (!selection.wants(group)) return false;
             // Legacy Reader/checkpoint APIs return raw snapshots. Their owner
             // adapters retain the stricter complete-record validation.
             if (strict) return selection.accept(group, present);
-            auto status = validate_group(as_view(owner), group);
+            auto status = [&] {
+                if constexpr (std::is_same_v<decltype(group), Quantity>)
+                    return validate_quantity(as_view(owner), group);
+                else
+                    return validate_group(as_view(owner), group);
+            }();
+            if (!present) return selection.accept(group, false);
             return selection.accept(group, present,
                                     status ? "" : status.error());
         };
@@ -305,11 +311,20 @@ Result<Equilibrium> read_native_binary(const std::string& path,
             throw std::runtime_error(reason);
         owner.ns = ns;
         owner.mnmax = modes;
+        owner.symmetry = components == 12;
         owner.source = {OutputFormat::BINARY, version, checkpoint};
         if (selection.wants(DataGroup::GEOMETRY)) {
             owner.families.resize(components);
             bool ok = true;
-            for (auto& family : owner.families) {
+            for (std::size_t i = 0; i < owner.families.size(); ++i) {
+                auto& family = owner.families[i];
+                if (!selection.wants(native_family_quantity(i))) {
+                    if (!skip_bytes(fp, count * sizeof(double))) {
+                        ok = false;
+                        break;
+                    }
+                    continue;
+                }
                 family.resize(count);
                 if (!read_f64_array(fp, family)) {
                     ok = false;
@@ -317,7 +332,8 @@ Result<Equilibrium> read_native_binary(const std::string& path,
                 }
             }
             if (!ok) throw std::runtime_error("truncated spectral geometry");
-            if (!check(DataGroup::GEOMETRY, true)) owner.families.clear();
+            for (auto q : group_quantities(DataGroup::GEOMETRY))
+                if (!check(q, true)) drop_quantity(owner, q);
         } else if (!skip_bytes(fp, count * components * sizeof(double))) {
             throw std::runtime_error(
                 "cannot locate groups after spectral geometry");
@@ -331,7 +347,8 @@ Result<Equilibrium> read_native_binary(const std::string& path,
             reason.clear();
             if (version >= 8 &&
                 !read_derived_fields(fp, fields, reason,
-                                     selection.wants(DataGroup::FIELDS))) {
+                                     selection.wants(DataGroup::FIELDS),
+                                     &request)) {
                 selection.unavailable(DataGroup::FIELDS, reason);
                 for (auto group :
                      {DataGroup::GRID, DataGroup::INPUT, DataGroup::PROVENANCE})
@@ -343,8 +360,9 @@ Result<Equilibrium> read_native_binary(const std::string& path,
                 owner.fields = {fields.ntheta, fields.nzeta,
                                 std::move(fields.half_fields),
                                 std::move(fields.full_fields)};
-            if (!check(DataGroup::FIELDS, owner.has_fields()))
-                owner.fields.reset();
+            for (auto q : group_quantities(DataGroup::FIELDS))
+                if (!check(q, owner.fields.has_value()))
+                    drop_quantity(owner, q);
             if (metadata || selection.wants(DataGroup::PROVENANCE)) {
                 RunReport report;
                 reason.clear();

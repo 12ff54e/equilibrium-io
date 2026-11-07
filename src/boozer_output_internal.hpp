@@ -79,11 +79,16 @@ using ::equilibrium::RealBoozerSpectrum;
 
 void validate_result(const BoozerResult& result);
 void validate_group(const BoozerResult& result, DataGroup group);
-void validate_real_spectrum(const RealBoozerSpectrum& spectrum, int surfaces);
+void validate_real_spectrum(const RealBoozerSpectrum& spectrum,
+                            int surfaces,
+                            bool geometry = true,
+                            bool shift = true);
 RealBoozerSpectrum make_real_spectrum(const BoozerResult& result);
 MixedGridSpectrum restore_complex_spectrum(const RealBoozerSpectrum& spectrum,
                                            int source_ns,
-                                           int first_surface);
+                                           int first_surface,
+                                           bool geometry = true,
+                                           bool shift = true);
 
 #ifdef EQUILIBRIUM_HAVE_NETCDF
 void write_boozer_netcdf(const std::filesystem::path& path,

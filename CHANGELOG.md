@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Select individual quantities with group assignment presets. Validate optional
+  values independently, including pressure versus I/G and R/Z versus spectral
+  shifts. Report partial groups without hiding usable members.
+- Add named borrowed views, shared native/Boozer validation, field and spectral
+  indexing, radial/axis helpers, and normalized legacy Boozer B²J access.
+  These APIs use concrete types and do not copy numerical arrays.
 - Add required, optional and ignored group requests for native binary,
   checkpoint, NetCDF, HDF5 and Boozer binary reads, with per-group diagnostics
   and instance capability queries. Existing no-options reads remain strict.

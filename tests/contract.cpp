@@ -1,5 +1,6 @@
 #include "equilibrium/checkpoint.hpp"
 #include "equilibrium/io.hpp"
+#include "equilibrium/reader.hpp"
 #include "equilibrium/validation.hpp"
 #include "equilibrium/writer.hpp"
 
@@ -24,6 +25,9 @@ concept BorrowableTemporary = requires { eq::as_view(T{}); };
 static_assert(!BorrowableTemporary<eq::Equilibrium>);
 static_assert(!BorrowableTemporary<eq::EquilibriumSnapshot>);
 static_assert(!BorrowableTemporary<eq::EquilibriumProfiles>);
+template <class T>
+concept FieldFromTemporary = requires { T{}.contravariant_field(); };
+static_assert(!FieldFromTemporary<eq::Equilibrium>);
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -272,7 +276,7 @@ void test_requests(const std::filesystem::path& scratch) {
                 bool(decoded) && !decoded.value().has_fields() &&
                     decoded.value().has_grid() &&
                     decoded.value().read_diagnostics[G::FIELDS].availability ==
-                        A::INVALID,
+                        A::PARTIAL,
                 "partial optional scientific datasets blocked grid");
             selected[G::FIELDS] = R::IGNORED;
             require(bool(eq::read(path, selected)),
@@ -280,6 +284,8 @@ void test_requests(const std::filesystem::path& scratch) {
             selected[G::FIELDS] = R::REQUIRED;
             require(!eq::read(path, selected),
                     "partial required datasets accepted");
+            require(!eq::make_reader(format)->read(path),
+                    "legacy reader accepted an absent field quantity");
         }
 
         if (format != eq::OutputFormat::BINARY) {
@@ -448,7 +454,7 @@ void test_requests(const std::filesystem::path& scratch) {
     auto decoded = eq::read_binary(path, selected);
     require(bool(decoded) && !decoded.value().has_fields() &&
                 decoded.value().read_diagnostics[G::FIELDS].availability ==
-                    A::INVALID,
+                    A::PARTIAL,
             "invalid optional physical fields exposed");
     selected[G::FIELDS] = R::IGNORED;
     decoded = eq::read_binary(path, selected);
@@ -484,12 +490,157 @@ void test_requests(const std::filesystem::path& scratch) {
             "checkpoint capability request failed");
 }
 
+void test_quantities(const std::filesystem::path& scratch) {
+    using Q = eq::Quantity;
+    using R = eq::Requirement;
+    using A = eq::Availability;
+    eq::ReadRequest request;
+    const std::array<double, 4> axis_modes{0, 0, 0, 2};
+    eq::AxisGeometryView axis;
+    axis.nfp = std::numeric_limits<int>::max();
+    axis.families[0] = {axis_modes, axis_modes.size(), 1};
+    require(
+        std::abs(axis.cylindrical(1. / axis.nfp)[0] - 2 * std::cos(3.)) < 1e-14,
+        "axis harmonic phase overflowed before conversion to double");
+    request[eq::DataGroup::FIELDS] = R::REQUIRED;
+    request[Q::CURRENT_DENSITY] = R::IGNORED;
+    request[Q::COVARIANT_FIELD] = R::OPTIONAL;
+    require(request[Q::CONTRAVARIANT_FIELD] == R::REQUIRED &&
+                request[Q::CURRENT_DENSITY] == R::IGNORED &&
+                request[Q::COVARIANT_FIELD] == R::OPTIONAL,
+            "quantity overrides preset");
+    request[eq::DataGroup::FIELDS] = R::IGNORED;
+    require(request[Q::CONTRAVARIANT_FIELD] == R::IGNORED,
+            "later preset overrides quantity");
+    for (auto q : {Q::GEOMETRY, Q::GRID, Q::CONTRAVARIANT_FIELD})
+        request[q] = R::REQUIRED;
+    request[Q::MAGNETIC_JACOBIAN] = R::OPTIONAL;
+    auto owner = fixture();
+    require(!eq::validate_quantity(eq::as_view(owner), Q::PRESSURE),
+            "native validator certified an unsupported quantity");
+    owner.symmetry = true;
+    require(!owner.has_geometry() && !owner.lambda_coefficients() &&
+                !eq::validate_quantity(eq::as_view(owner), Q::GEOMETRY) &&
+                !eq::validate_quantity(eq::as_view(owner), Q::SPECTRAL_SHIFT),
+            "asymmetric metadata accepted six families");
+    owner.symmetry = false;
+    auto& fields = owner.fields.emplace();
+    fields.ntheta = 8;
+    fields.nzeta = 1;
+    for (auto& f : fields.half) f.assign(16, 1);
+    for (auto& f : fields.full) f.assign(24, 2);
+    // Low-level writers let this test create semantically invalid, framed data.
+    owner.families[2][0] = std::numeric_limits<double>::quiet_NaN();
+    fields.half[0][0] = std::numeric_limits<double>::quiet_NaN();
+    fields.full[0][0] = std::numeric_limits<double>::quiet_NaN();
+    eq::RunReport report;
+    static_cast<eq::RunProvenance&>(report) = *owner.provenance;
+    report.input_params = *owner.input;
+    for (auto format : {eq::OutputFormat::BINARY, eq::OutputFormat::NETCDF,
+                        eq::OutputFormat::HDF5}) {
+        if (!eq::output_format_available(format)) continue;
+        const auto path =
+            (scratch / ("quantities" + std::string(eq::output_suffix(format))))
+                .string();
+        require(bool(eq::create_writer(format)->write_atomic(
+                    eq::as_snapshot_view(eq::as_view(owner)), report,
+                    {format, path})),
+                "quantity fixture");
+        auto read = eq::read(path, request);
+        if (!read) throw std::runtime_error(read.error());
+        const auto& data = read.value();
+        require(data.has_geometry() &&
+                    !data.has_group(eq::DataGroup::GEOMETRY) &&
+                    !data.has_fields() && data.families[2].empty(),
+                "partial geometry capabilities");
+        const auto field = data.contravariant_field();
+        require(
+            field &&
+                field->components[0].data() == data.fields->half[1].data() &&
+                field->grid.index(1, 3, 0) == 11,
+            "typed field view must borrow theta-fast arrays");
+        require(!data.covariant_field() && !data.current_density() &&
+                    data.fields->full[0].empty() &&
+                    data.fields->half[4].empty(),
+                "ignored fields allocated or exposed");
+        require(data.read_diagnostics[Q::MAGNETIC_JACOBIAN].availability ==
+                        A::INVALID &&
+                    data.read_diagnostics[Q::CURRENT_DENSITY].availability ==
+                        A::NOT_REQUESTED &&
+                    data.read_diagnostics[eq::DataGroup::FIELDS].availability ==
+                        A::PARTIAL,
+                "independent quantity diagnostics");
+        const auto geometry = data.geometry_coefficients().value();
+        require(geometry.grid.index(2, 1, 0) == 5 && data.full_s(1) == .5 &&
+                    data.half_s(0) == .25,
+                "native layout and radial coordinates");
+        const auto axis = data.axis_geometry().value().cylindrical(.7);
+        require(axis[0] == owner.families[0][0] && axis[1] == 0,
+                "native axis accessor");
+        require(!eq::write(path + ".partial", data),
+                "partial selection accepted by complete writer");
+        auto required = request;
+        required[Q::MAGNETIC_JACOBIAN] = R::REQUIRED;
+        require(!eq::read(path, required),
+                "required invalid quantity accepted");
+        required = request;
+        required[Q::SPECTRAL_SHIFT] = R::REQUIRED;
+        require(!eq::read(path, required), "required invalid lambda accepted");
+        required = request;
+        required[Q::CURRENT_DENSITY] = R::REQUIRED;
+        require(!eq::read(path, required),
+                "required invalid current density accepted");
+    }
+#ifdef EQUILIBRIUM_HAVE_HDF5
+    owner.families[2][0] = fields.half[0][0] = fields.full[0][0] = 1;
+    const auto path = (scratch / "quantity-grids.h5").string();
+    const auto different_grid = [&](bool invalid) {
+        require(bool(eq::write(path, owner)), "HDF5 grid-conflict fixture");
+        const auto file = H5Fopen(path.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+        require(file >= 0, "open HDF5 grid-conflict fixture");
+        const hsize_t dims[]{2, 1, 4};
+        const auto space = H5Screate_simple(3, dims, nullptr);
+        std::array<double, 8> values{};
+        if (invalid) values[0] = std::numeric_limits<double>::quiet_NaN();
+        for (const auto* name : {"bsubs", "bsubu", "bsubv"}) {
+            require(H5Ldelete(file, name, H5P_DEFAULT) >= 0,
+                    "replace field grid");
+            const auto dataset =
+                H5Dcreate2(file, name, H5T_IEEE_F64LE, space, H5P_DEFAULT,
+                           H5P_DEFAULT, H5P_DEFAULT);
+            require(dataset >= 0 &&
+                        H5Dwrite(dataset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL,
+                                 H5P_DEFAULT, values.data()) >= 0,
+                    "write field grid");
+            H5Dclose(dataset);
+        }
+        H5Sclose(space);
+        H5Fclose(file);
+    };
+    for (bool invalid : {false, true}) {
+        different_grid(invalid);
+        eq::ReadRequest selected;
+        selected[Q::GRID] = invalid ? R::IGNORED : R::REQUIRED;
+        selected[Q::CONTRAVARIANT_FIELD] = selected[Q::COVARIANT_FIELD] =
+            R::OPTIONAL;
+        auto loaded = eq::read(path, selected);
+        require(bool(loaded) && loaded.value().contravariant_field() &&
+                    !loaded.value().covariant_field() &&
+                    loaded.value().contravariant_field()->grid.ntheta == 8,
+                "invalid or conflicting optional field discarded usable peer");
+        require(!eq::make_reader(eq::OutputFormat::HDF5)->read(path),
+                "legacy HDF5 reader accepted inconsistent field grids");
+    }
+#endif
+}
+
 int main(int argc, char** argv) {
     try {
         require(argc == 2, "expected scratch directory");
         const auto scratch = std::filesystem::path(argv[1]);
         std::filesystem::create_directories(scratch);
         test_requests(scratch);
+        test_quantities(scratch);
         auto owner = fixture();
         require(bool(eq::validate(eq::as_view(owner))),
                 "valid fixture rejected");

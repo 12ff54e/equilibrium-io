@@ -53,11 +53,15 @@ now owns the historical-reader, malformed-container, codec, and installed-packag
 regression suites. cuMES retains adapter, derived-field, solver, and browser
 integration checks.
 
-Requested-group reads provide a separate admission contract: required,
-optional and ignored groups have independent validation and diagnostics.
-See [Requested data groups](../README.md#requested-data-groups). These reads
+Selected reads provide a separate admission contract: required, optional
+and ignored quantities have independent validation and diagnostics. Group
+assignments expand presets; later assignments override their members.
+See [Requested quantities](../README.md#requested-quantities). These reads
 use capabilities rather than consumer version gates and permit unused
 trailing binary data. Existing no-options APIs retain their strict behavior.
+Group capability checks require all members; group diagnostics can report
+`PARTIAL`. Writers reject selections that omit data required by the output schema.
+The new request and view types change the C++ ABI; consumers must rebuild.
 
 ## Analysis readers
 

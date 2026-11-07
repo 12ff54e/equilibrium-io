@@ -80,55 +80,76 @@ The `io` component adds suffix dispatch and NetCDF/HDF5 export. `convert` and
 NetCDF/HDF5 input is not supported by the C++ API. Writers retain optional
 groups and source provenance; no absent group is filled with invented values.
 
-## Requested data groups
+## Requested quantities
 
-The C++ readers can select physical groups independently of file versions.
-A new `ReadRequest` ignores every group until the caller requests it:
+The C++ readers select physical quantities independently of file versions.
+A new `ReadRequest` ignores every quantity until the caller requests it:
 
 ```cpp
 #include <equilibrium/binary.hpp>
 
 equilibrium::ReadRequest request;
-request[equilibrium::DataGroup::GEOMETRY] = equilibrium::Requirement::REQUIRED;
-request[equilibrium::DataGroup::FIELDS] = equilibrium::Requirement::REQUIRED;
-request[equilibrium::DataGroup::GRID] = equilibrium::Requirement::REQUIRED;
-request[equilibrium::DataGroup::PROVENANCE] = equilibrium::Requirement::OPTIONAL;
+using Q = equilibrium::Quantity;
+using R = equilibrium::Requirement;
+request[Q::GEOMETRY] = R::REQUIRED;
+request[Q::CONTRAVARIANT_FIELD] = R::REQUIRED;
+request[Q::GRID] = R::REQUIRED;
+request[Q::PROVENANCE] = R::OPTIONAL;
 auto decoded = equilibrium::read_binary("equilibrium.bin", request);
 if (!decoded) throw std::runtime_error(decoded.error());
 const auto& eq = decoded.value();
 if (eq.has_provenance()) {
     // eq.provenance is a typed optional record.
 }
+const auto field = eq.contravariant_field().value();
+const auto i = field.grid.index(0, 1, 0);  // radial, theta, zeta
+const double b_theta = field.components[1][i];
 ```
 
 `read(path, request)` and `read(path, format, request)` apply the same
-contract to native binary, checkpoints, NetCDF and HDF5. Required groups must
-be present and valid. Optional groups return usable data or a diagnostic;
-ignored groups skip decoding and validation where the container permits.
-Binary readers may need to scan an ignored group's framing to reach later
-data. Damage that prevents locating a required group fails the read.
-When independently valid groups disagree, required groups take precedence:
-the conflicting optional group becomes `INVALID`. Two conflicting required
-groups fail the read; two conflicting optional groups are both omitted.
+contract to native binary, checkpoints, NetCDF and HDF5. Required quantities
+must be present and valid. Optional quantities return usable data or a
+diagnostic; ignored quantities skip allocation, decoding and validation where
+the container permits. Binary readers still need framing to locate later
+data. HDF5 uses the `rmncc` dataset shape for mandatory source dimensions,
+even when geometry is ignored. Damage to that framing fails the read.
+
+`DataGroup` assignments expand presets immediately; the last assignment wins.
+For example, assigning `FIELDS = REQUIRED`, then `CURRENT_DENSITY = IGNORED`,
+requires the magnetic Jacobian and both magnetic vectors without current
+density. `GEOMETRY` as a group includes both R/Z geometry and the spectral
+shift; `Quantity::GEOMETRY` includes only R/Z. The shift is native lambda or
+Boozer nu. Groups have no single requirement getter after overrides; query
+each quantity instead.
+
+Validation first checks each quantity, then relations between available
+quantities. Required values take precedence over conflicting optional ones.
+Conflicting required quantities fail the read; conflicting optional quantities
+are omitted. Bad pressure does not discard usable I/G profiles.
 
 | Read status | Meaning |
 | --- | --- |
-| `AVAILABLE` | The requested group passed validation and is exposed |
-| `ABSENT` | The format or file has no such group |
-| `NOT_REQUESTED` | The caller ignored the group |
-| `INVALID` | The group could not be decoded or validated; `diagnostic` explains why |
+| `AVAILABLE` | The quantity passed validation and is exposed |
+| `ABSENT` | The format or file has no such quantity |
+| `NOT_REQUESTED` | The caller ignored the quantity |
+| `INVALID` | Decoding or validation failed; `diagnostic` explains why |
+| `PARTIAL` | Group summary only: some, but not all, members are available |
 
-Inspect `eq.read_diagnostics[DataGroup::PROVENANCE]`, for example. Diagnostics
+Inspect `eq.read_diagnostics[Quantity::PROVENANCE]`, for example. Diagnostics
 describe the read; `has_*` queries and optional members describe the object's
-current contents if callers later mutate it. Coordinate dimensions remain
-mandatory. Native fields include seven half-grid and six full-grid arrays.
+current contents if callers later mutate it. `has_quantity()` and named
+optional accessors report individual capabilities; `has_group()` requires
+every member of the preset. Coordinate dimensions remain mandatory. Native
+magnetic values use the half grid; current density uses the full grid.
 Grid metadata can be read without exposing or validating saved input.
 Solved native profiles remain absent in the current file formats.
 
-Boozer requests use `BoozerReadOptions`. By default, geometry and strength are
-required; tracing, magnetic/maps and surface profiles are optional.
-The shared radial coordinates are always read and validated. Magnetic/maps
-and surface profiles can be read without exposing tracing data.
+Boozer requests use `BoozerReadOptions::groups`, which accepts both quantities
+and group presets. By default, geometry, spectral shift, iota and strength
+are required; tracing, magnetic/maps and surface profiles are optional.
+Set `options.groups = {}` to start with no requested quantities. Shared radial
+coordinates are always read and validated. Iota is independently selectable.
+Magnetic/maps and surface profiles can be read without exposing tracing data.
 `magnetic_data()` returns a typed optional reference in either case;
 complete reads retain the existing `tracing->magnetic` member.
 
@@ -141,8 +162,9 @@ auto file = equilibrium::read_boozer_binary("boozer.bin", options);
 const auto& coefficients = *file.result.real_spectrum;
 ```
 
-`REAL` preserves the stored real parity coefficients exactly and leaves
-complex arrays empty. Inactive `sin(0)` terms remain stored but contribute
+`REAL` preserves the requested real parity coefficients exactly and leaves
+complex arrays empty. R/Z geometry and spectral nu can be requested separately
+in all three storage modes. Inactive `sin(0)` terms remain stored but contribute
 nothing to complex reconstruction. `COMPLEX` retains the existing representation;
 `BOTH` stores both. `has_real_spectrum()` and `has_complex_spectrum()` report
 which representations are exposed. Writers use the real representation when
@@ -154,6 +176,25 @@ contracts. Selected binary reads accept unused trailing data; they still
 require valid framing for requested groups. `detect_binary_kind(path)`
 classifies native versus Boozer input without making a capability claim.
 All binary byte-order conversion belongs to this package.
+
+Named accessors return concrete spans or views, without type erasure or copies
+of numerical arrays. Field and spectral views provide their storage indices;
+`full_s()` and `half_s()` provide source radial coordinates. `axis_geometry()`
+evaluates R/Z at a physical toroidal angle. `b2_jacobian()` exposes the legacy
+`b2j00/(4*pi*pi)` profile without allocating a normalized array; it is distinct
+from the signed `magnetic_jacobian()` used with magnetic components.
+Native `axis_geometry()` derives its view from R/Z and GRID; the selectable
+`AXIS_GEOMETRY` quantity refers to the separate stored Boozer axis record.
+
+Keep the owner alive and its buffers unchanged while using a view. Borrowing
+from temporary owners is disabled. For caller-built data, use
+`validate_quantity(as_view(owner), quantity)` for each needed quantity and
+its shared metadata before taking views. Native geometry indexing also
+requires a valid `GRID`; `validate()` checks a complete native record. Native
+validation is header-only in `equilibrium/validation.hpp`; Boozer validation
+and cross-quantity checks use `equilibrium/boozer_validation.hpp` and link
+`equilibrium::binary` (or `equilibrium::io`). Consumers still own Fourier
+reconstruction, interpolation and application-specific numerical checks.
 
 ## Standalone WebAssembly converter
 

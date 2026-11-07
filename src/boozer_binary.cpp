@@ -1,6 +1,7 @@
 #include "equilibrium/boozer_binary.hpp"
 
 #include "boozer_output_internal.hpp"
+#include "equilibrium/boozer_validation.hpp"
 #include "equilibrium/writer_helpers.hpp"
 #include "read_selection.hpp"
 
@@ -350,221 +351,278 @@ BoozerFile read_selected(const std::filesystem::path& path,
                         static_cast<std::size_t>(result.grid.nzeta)));
     const std::size_t coefficient_count =
         checked_product(static_cast<std::size_t>(surfaces), mode_count);
-    result.s = reader.doubles(static_cast<std::size_t>(surfaces));
-    result.iota = reader.doubles(static_cast<std::size_t>(surfaces));
-
-    // Coordinates are shared by all groups and remain mandatory.
-    boozer_detail::validate_group(result, DataGroup::COUNT);
+    using Q = Quantity;
+    if (options.spectrum != SpectrumStorage::REAL &&
+        options.spectrum != SpectrumStorage::COMPLEX &&
+        options.spectrum != SpectrumStorage::BOTH)
+        throw std::invalid_argument("unsupported Boozer spectrum storage");
+    result.s = reader.doubles(surfaces);
+    const auto coordinates = validate_boozer_coordinates(as_view(result));
+    if (!coordinates) throw std::runtime_error(coordinates.error());
+    std::array<std::string, static_cast<std::size_t>(Q::COUNT)> errors;
     std::string blocked;
-    auto process = [&](DataGroup group, bool present, auto decode, auto drop,
-                       bool validate = true) {
-        std::string reason;
-        if (present) {
-            if (!blocked.empty())
-                reason = blocked;
-            else {
-                try {
-                    reason = decode();
-                } catch (const FramingError& error) {
-                    if (strict) throw;
-                    reason = blocked = error.what();
-                }
-                if (reason.empty() && validate && selection.wants(group)) {
-                    try {
-                        boozer_detail::validate_group(result, group);
-                    } catch (const std::exception& error) {
-                        reason = error.what();
-                    }
-                }
+    const auto read_block = [&](Q q, auto decode) {
+        if (!blocked.empty()) {
+            errors[static_cast<std::size_t>(q)] = blocked;
+            return;
+        }
+        try {
+            decode();
+        } catch (const FramingError& e) {
+            if (strict) throw;
+            blocked = errors[static_cast<std::size_t>(q)] = e.what();
+        }
+    };
+    const auto doubles = [&](Q q, auto& values, std::size_t count) {
+        read_block(q,
+                   [&] { values = reader.doubles(count, selection.wants(q)); });
+    };
+    const auto real_families = [](auto& r) {
+        return std::array{&r.rmncc,  &r.rmnss,  &r.zmnsc,  &r.zmncs,
+                          &r.numnsc, &r.numncs, &r.rmnsc,  &r.rmncs,
+                          &r.zmncc,  &r.zmnss,  &r.numncc, &r.numnss};
+    };
+    const auto drop = [&](Q q) {
+        if (q == Q::ROTATIONAL_TRANSFORM) result.iota.clear();
+        if (q == Q::GEOMETRY || q == Q::SPECTRAL_SHIFT) {
+            if (result.real_spectrum) {
+                auto families = real_families(*result.real_spectrum);
+                for (std::size_t i = 0; i < families.size(); ++i)
+                    if ((i % 6 < 4) == (q == Q::GEOMETRY)) families[i]->clear();
+            }
+            if (q == Q::GEOMETRY) {
+                result.spectrum.r.clear();
+                result.spectrum.z.clear();
+            } else
+                result.spectrum.nu.clear();
+        }
+        if (q == Q::FIELD_STRENGTH) result.grid.b.clear();
+        if (q == Q::STRENGTH_JACOBIAN) result.grid.sqrtg_b.clear();
+        if (q == Q::B2_JACOBIAN) result.grid.b2j00.clear();
+        if (q == Q::TOROIDAL_SHIFT) result.grid.nu.clear();
+        if (q == Q::SOURCE_THETA_SHIFT) result.grid.source_theta_shift.clear();
+        if (result.profiles) {
+            if (q == Q::PRESSURE) result.profiles->pressure.clear();
+            if (q == Q::SURFACE_CURRENTS) {
+                result.profiles->current_i.clear();
+                result.profiles->current_g.clear();
             }
         }
-        if (!selection.accept(group, present, reason)) drop();
-    };
-    const auto finish = [&]() {
-        if (result.tracing && result.independent_magnetic) {
-            result.tracing->magnetic = std::move(result.independent_magnetic);
-            result.independent_magnetic.reset();
+        if (result.tracing) {
+            auto& t = *result.tracing;
+            if (q == Q::FLUX_INPUT) {
+                t.phiedge = 0;
+                t.aphi.clear();
+                t.pflux_type.clear();
+            }
+            if (q == Q::FLUX_DERIVATIVES) {
+                t.toroidal_flux_derivative.clear();
+                t.poloidal_flux_derivative.clear();
+            }
+            if (q == Q::AXIS_GEOMETRY) {
+                t.axis_r_cos.clear();
+                t.axis_r_sin.clear();
+                t.axis_z_cos.clear();
+                t.axis_z_sin.clear();
+            }
+            if (q == Q::AXIS_FIELDS) {
+                t.axis_half_s.clear();
+                for (auto& f : t.axis_half_fields) f.clear();
+            }
         }
-        selection.finish();
-        if (strict) validate_boozer_result(result);
-        result.read_diagnostics = std::move(selection.diagnostics);
-        return std::move(file);
+        if (result.independent_magnetic)
+            for (std::size_t i = 0;
+                 i < result.independent_magnetic->fields.size(); ++i)
+                if (half_field_quantity(i) == q)
+                    result.independent_magnetic->fields[i].clear();
     };
-    process(
-        DataGroup::GEOMETRY, true,
-        [&]() -> std::string {
-            const bool load = selection.wants(DataGroup::GEOMETRY);
-            RealBoozerSpectrum spectrum;
-            spectrum.lasym = lasym;
-            spectrum.mmax = result.spectrum.mmax;
-            spectrum.nmax = result.spectrum.nmax;
-            spectrum.m = reader.integers(mode_count, load);
-            spectrum.n = reader.integers(mode_count, load);
-            for (auto* family :
-                 {&spectrum.rmncc, &spectrum.rmnss, &spectrum.zmnsc,
-                  &spectrum.zmncs, &spectrum.numnsc, &spectrum.numncs})
-                *family = reader.doubles(coefficient_count, load);
-            if (lasym)
-                for (auto* family :
-                     {&spectrum.rmnsc, &spectrum.rmncs, &spectrum.zmncc,
-                      &spectrum.zmnss, &spectrum.numncc, &spectrum.numnss})
-                    *family = reader.doubles(coefficient_count, load);
-            if (!load) return {};
-            if (fourier_convention !=
-                (lasym ? boozer_detail::ASYMMETRIC_FOURIER_CONVENTION
-                       : boozer_detail::FOURIER_CONVENTION))
-                return "unsupported Boozer Fourier convention";
-            try {
-                boozer_detail::validate_real_spectrum(spectrum, surfaces);
-                if (options.spectrum != SpectrumStorage::REAL)
-                    result.spectrum = boozer_detail::restore_complex_spectrum(
-                        spectrum, result.source_ns, result.grid.first_surface);
-                if (options.spectrum != SpectrumStorage::COMPLEX)
-                    result.real_spectrum = std::move(spectrum);
-            } catch (const std::exception& error) { return error.what(); }
-            return {};
-        },
-        [&] {
-            result.real_spectrum.reset();
-            result.spectrum = {};
-        });
-    if (!selection.wants(DataGroup::STRENGTH) &&
-        !selection.wants(DataGroup::TRACING) &&
-        !selection.wants(DataGroup::MAGNETIC) &&
-        !selection.wants(DataGroup::PROFILES))
-        return finish();
-    process(
-        DataGroup::STRENGTH, true,
-        [&]() -> std::string {
-            const bool load = selection.wants(DataGroup::STRENGTH);
-            result.grid.b = reader.doubles(real_count, load);
-            result.grid.sqrtg_b = reader.doubles(real_count, load);
-            result.grid.b2j00 = reader.doubles(surfaces, load);
-            return {};
-        },
-        [&] {
-            result.grid.b.clear();
-            result.grid.sqrtg_b.clear();
-            result.grid.b2j00.clear();
-        });
-    if (!selection.wants(DataGroup::TRACING) &&
-        !selection.wants(DataGroup::MAGNETIC) &&
-        !selection.wants(DataGroup::PROFILES))
-        return finish();
+    const auto check = [&](Q q, bool present) {
+        std::string reason = errors[static_cast<std::size_t>(q)];
+        if (selection.wants(q) && present && reason.empty()) {
+            const auto status = validate_quantity(as_view(result), q);
+            if (!status) reason = status.error();
+        }
+        if (!selection.accept(q, present, reason)) drop(q);
+    };
+    selection.accept(Q::GRID, true);
+    doubles(Q::ROTATIONAL_TRANSFORM, result.iota, surfaces);
+    check(Q::ROTATIONAL_TRANSFORM, true);
 
-    // The flux profile kind follows profiles in newer files. Delay tracing
-    // validation until that field is decoded; optional profiles are
-    // independent.
-    std::string tracing_error;
-    if (has_tracing && blocked.empty()) {
-        try {
-            const bool load = selection.wants(DataGroup::TRACING);
-            const auto convention = reader.string();
-            const int aphi_count = reader.i32();
-            const int width = static_cast<int>(result.radial_order);
-            if (aphi_count < 1 || aphi_count > (1 << 20) ||
-                (width != 2 && width != 4) || result.source_ns <= width ||
-                result.source_ntor < 0 || result.source_ntor > (1 << 15) ||
-                result.source_ntheta < 1 || result.source_nzeta < 1)
-                throw FramingError("invalid Boozer tracing dimensions");
-            BoozerTracingData tracing;
-            tracing.phiedge = reader.f64();
-            tracing.aphi = reader.doubles(aphi_count, load);
-            tracing.toroidal_flux_derivative =
-                reader.doubles(result.source_ns, load);
-            tracing.poloidal_flux_derivative =
-                reader.doubles(result.source_ns, load);
-            const auto axis_modes =
-                static_cast<std::size_t>(result.source_ntor) + 1;
-            tracing.axis_r_cos = reader.doubles(axis_modes, load);
-            tracing.axis_r_sin = reader.doubles(axis_modes, load);
-            tracing.axis_z_cos = reader.doubles(axis_modes, load);
-            tracing.axis_z_sin = reader.doubles(axis_modes, load);
-            tracing.axis_half_s = reader.doubles(width, load);
-            const auto half_count = checked_product(
+    RealBoozerSpectrum spectrum;
+    spectrum.lasym = lasym;
+    spectrum.mmax = result.spectrum.mmax;
+    spectrum.nmax = result.spectrum.nmax;
+    const bool spectra = selection.wants(DataGroup::GEOMETRY);
+    read_block(Q::GEOMETRY, [&] {
+        spectrum.m = reader.integers(mode_count, spectra);
+        spectrum.n = reader.integers(mode_count, spectra);
+    });
+    if (!blocked.empty())
+        errors[static_cast<std::size_t>(Q::SPECTRAL_SHIFT)] = blocked;
+    auto families = real_families(spectrum);
+    for (std::size_t i = 0; i < (lasym ? 12U : 6U); ++i)
+        doubles(i % 6 < 4 ? Q::GEOMETRY : Q::SPECTRAL_SHIFT, *families[i],
+                coefficient_count);
+    if (spectra) {
+        result.real_spectrum = std::move(spectrum);
+        if (fourier_convention !=
+            (lasym ? boozer_detail::ASYMMETRIC_FOURIER_CONVENTION
+                   : boozer_detail::FOURIER_CONVENTION))
+            for (auto q : group_quantities(DataGroup::GEOMETRY))
+                errors[static_cast<std::size_t>(q)] =
+                    "unsupported Boozer Fourier convention";
+    }
+    for (auto q : group_quantities(DataGroup::GEOMETRY)) check(q, true);
+    const bool geometry = result.has_quantity(Q::GEOMETRY);
+    const bool shift = result.has_quantity(Q::SPECTRAL_SHIFT);
+    if (geometry || shift) {
+        if (options.spectrum != SpectrumStorage::REAL)
+            result.spectrum = boozer_detail::restore_complex_spectrum(
+                *result.real_spectrum, result.source_ns,
+                result.grid.first_surface, geometry, shift);
+        if (options.spectrum == SpectrumStorage::COMPLEX)
+            result.real_spectrum.reset();
+    } else
+        result.real_spectrum.reset();
+
+    doubles(Q::FIELD_STRENGTH, result.grid.b, real_count);
+    doubles(Q::STRENGTH_JACOBIAN, result.grid.sqrtg_b, real_count);
+    doubles(Q::B2_JACOBIAN, result.grid.b2j00, surfaces);
+    for (auto q : group_quantities(DataGroup::STRENGTH)) check(q, true);
+
+    if (has_tracing) {
+        BoozerTracingData t;
+        std::string convention;
+        int aphi_count = 0;
+        read_block(Q::FLUX_INPUT, [&] {
+            convention = reader.string();
+            aphi_count = reader.i32();
+            if (aphi_count < 0 || aphi_count > (1 << 20))
+                throw FramingError("invalid flux-input extent");
+            const double phiedge = reader.f64();
+            if (selection.wants(Q::FLUX_INPUT)) t.phiedge = phiedge;
+        });
+        doubles(Q::FLUX_INPUT, t.aphi, aphi_count);
+        doubles(Q::FLUX_DERIVATIVES, t.toroidal_flux_derivative,
+                result.source_ns);
+        doubles(Q::FLUX_DERIVATIVES, t.poloidal_flux_derivative,
+                result.source_ns);
+        std::size_t axis_modes = 0;
+        read_block(Q::AXIS_GEOMETRY, [&] {
+            if (result.source_ntor < 0 || result.source_ntor > (1 << 15))
+                throw FramingError("invalid axis mode count");
+            axis_modes = static_cast<std::size_t>(result.source_ntor) + 1;
+        });
+        for (auto* values :
+             {&t.axis_r_cos, &t.axis_r_sin, &t.axis_z_cos, &t.axis_z_sin})
+            doubles(Q::AXIS_GEOMETRY, *values, axis_modes);
+        std::size_t width = 0, half_count = 0;
+        read_block(Q::AXIS_FIELDS, [&] {
+            const int order = static_cast<int>(result.radial_order);
+            if (order < 0 || order > (1 << 20) || result.source_ntheta < 1 ||
+                result.source_nzeta < 1)
+                throw FramingError("invalid axis field extents");
+            width = order;
+            half_count = checked_product(
                 width,
                 checked_product(result.source_ntheta, result.source_nzeta));
-            for (auto& field : tracing.axis_half_fields)
-                field = reader.doubles(half_count, load);
-            if (load) {
-                result.tracing = std::move(tracing);
-                if (convention != boozer_detail::TRACING_CONVENTION)
-                    tracing_error = "unsupported Boozer tracing convention";
+        });
+        doubles(Q::AXIS_FIELDS, t.axis_half_s, width);
+        for (auto& values : t.axis_half_fields)
+            doubles(Q::AXIS_FIELDS, values, half_count);
+        if (selection.wants(DataGroup::TRACING)) result.tracing = std::move(t);
+        if (!convention.empty() &&
+            convention != boozer_detail::TRACING_CONVENTION)
+            for (auto q : group_quantities(DataGroup::TRACING))
+                errors[static_cast<std::size_t>(q)] =
+                    "unsupported Boozer tracing convention";
+    }
+    if (has_magnetic) {
+        std::string convention;
+        read_block(Q::MAGNETIC_JACOBIAN, [&] { convention = reader.string(); });
+        BoozerMagneticData magnetic;
+        for (std::size_t i = 0; i < magnetic.fields.size(); ++i)
+            doubles(half_field_quantity(i), magnetic.fields[i], real_count);
+        doubles(Q::SOURCE_THETA_SHIFT, result.grid.source_theta_shift,
+                real_count);
+        doubles(Q::TOROIDAL_SHIFT, result.grid.nu, real_count);
+        if (selection.wants(Q::MAGNETIC_JACOBIAN) ||
+            selection.wants(Q::CONTRAVARIANT_FIELD) ||
+            selection.wants(Q::COVARIANT_FIELD))
+            result.independent_magnetic = std::move(magnetic);
+        if (!convention.empty() &&
+            convention != boozer_detail::MAGNETIC_CONVENTION)
+            for (auto q : group_quantities(DataGroup::MAGNETIC))
+                errors[static_cast<std::size_t>(q)] =
+                    "unsupported Boozer magnetic convention";
+    }
+    if (has_profiles) {
+        std::string convention;
+        read_block(Q::PRESSURE, [&] { convention = reader.string(); });
+        BoozerSurfaceProfiles profiles;
+        doubles(Q::PRESSURE, profiles.pressure, surfaces);
+        doubles(Q::SURFACE_CURRENTS, profiles.current_i, surfaces);
+        doubles(Q::SURFACE_CURRENTS, profiles.current_g, surfaces);
+        if (selection.wants(DataGroup::PROFILES))
+            result.profiles = std::move(profiles);
+        if (!convention.empty() &&
+            convention != boozer_detail::PROFILE_CONVENTION)
+            for (auto q : group_quantities(DataGroup::PROFILES))
+                errors[static_cast<std::size_t>(q)] =
+                    "unsupported Boozer profile convention";
+    }
+    if (has_flux_type && selection.wants(Q::FLUX_INPUT))
+        read_block(Q::FLUX_INPUT, [&] {
+            const auto type = reader.string();
+            if (result.tracing) result.tracing->pflux_type = type;
+        });
+    for (auto q : group_quantities(DataGroup::TRACING)) check(q, has_tracing);
+    for (auto q : group_quantities(DataGroup::MAGNETIC)) check(q, has_magnetic);
+    for (auto q : group_quantities(DataGroup::PROFILES)) check(q, has_profiles);
+
+    // Validate relations after local checks, so an invalid optional value does
+    // not invalidate an independent required quantity. Resolve required-first.
+    for (bool required_pass : {true, false})
+        for (auto relation :
+             {BoozerConsistency::FLUX_IOTA, BoozerConsistency::SURFACE_CURRENTS,
+              BoozerConsistency::MAGNETIC}) {
+            const auto quantities = consistency_quantities(relation);
+            bool available = true, required = false;
+            for (auto q : quantities) {
+                available = available && selection.available(q);
+                required = required ||
+                           selection.requirement(q) == Requirement::REQUIRED;
             }
-        } catch (const FramingError& error) {
-            if (strict) throw;
-            blocked = error.what();
-        }
-    }
-    if (!blocked.empty()) tracing_error = blocked;
-    if (selection.wants(DataGroup::MAGNETIC) ||
-        selection.wants(DataGroup::PROFILES) ||
-        (has_flux_type && selection.wants(DataGroup::TRACING))) {
-        process(
-            DataGroup::MAGNETIC, has_magnetic,
-            [&]() -> std::string {
-                const bool load = selection.wants(DataGroup::MAGNETIC);
-                const auto convention = reader.string();
-                BoozerMagneticData magnetic;
-                for (auto& field : magnetic.fields)
-                    field = reader.doubles(real_count, load);
-                result.grid.source_theta_shift =
-                    reader.doubles(real_count, load);
-                result.grid.nu = reader.doubles(real_count, load);
-                if (load) {
-                    result.independent_magnetic = std::move(magnetic);
-                    if (convention != boozer_detail::MAGNETIC_CONVENTION)
-                        return "unsupported Boozer magnetic convention";
-                }
-                return {};
-            },
-            [&] {
-                result.independent_magnetic.reset();
-                result.grid.source_theta_shift.clear();
-                result.grid.nu.clear();
-            });
-    }
-    if (selection.wants(DataGroup::PROFILES) ||
-        (has_flux_type && selection.wants(DataGroup::TRACING))) {
-        process(
-            DataGroup::PROFILES, has_profiles,
-            [&]() -> std::string {
-                const bool load = selection.wants(DataGroup::PROFILES);
-                const auto convention = reader.string();
-                BoozerSurfaceProfiles profiles;
-                profiles.pressure = reader.doubles(surfaces, load);
-                profiles.current_i = reader.doubles(surfaces, load);
-                profiles.current_g = reader.doubles(surfaces, load);
-                if (load) {
-                    result.profiles = std::move(profiles);
-                    if (convention != boozer_detail::PROFILE_CONVENTION)
-                        return "unsupported Boozer surface profile convention";
-                }
-                return {};
-            },
-            [&] { result.profiles.reset(); });
-    }
-    if (has_flux_type && selection.wants(DataGroup::TRACING)) {
-        if (!blocked.empty())
-            tracing_error = blocked;
-        else {
-            try {
-                const auto type = reader.string();
-                if (result.tracing) result.tracing->pflux_type = type;
-            } catch (const FramingError& error) {
-                if (strict) throw;
-                tracing_error = error.what();
+            if (!available || required != required_pass) continue;
+            const auto status = validate_consistency(as_view(result), relation);
+            if (!status) {
+                if (strict) throw std::invalid_argument(status.error());
+                selection.conflict(quantities, status.error(), drop);
             }
         }
+    if (result.profiles && !result.has_quantity(Q::PRESSURE) &&
+        !result.has_quantity(Q::SURFACE_CURRENTS))
+        result.profiles.reset();
+    if (result.tracing) {
+        bool any = false;
+        for (auto q : group_quantities(DataGroup::TRACING))
+            any = any || result.has_quantity(q);
+        if (!any) result.tracing.reset();
     }
-    if (result.tracing && tracing_error.empty()) {
-        try {
-            boozer_detail::validate_group(result, DataGroup::TRACING);
-        } catch (const std::exception& error) { tracing_error = error.what(); }
+    if (result.independent_magnetic) {
+        bool any = false;
+        for (const auto& f : result.independent_magnetic->fields)
+            any = any || !f.empty();
+        if (!any) result.independent_magnetic.reset();
     }
-    if (!selection.accept(DataGroup::TRACING, has_tracing, tracing_error))
-        result.tracing.reset();
-    return finish();
+    if (result.tracing && result.independent_magnetic) {
+        result.tracing->magnetic = std::move(result.independent_magnetic);
+        result.independent_magnetic.reset();
+    }
+    selection.finish();
+    if (strict) validate_boozer_result(result);
+    result.read_diagnostics = std::move(selection.diagnostics);
+    return file;
 }
 }  // namespace
 
