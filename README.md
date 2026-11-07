@@ -77,8 +77,83 @@ The [Boozer v8 contract](docs/boozer-output-v8.md) links the preceding schemas.
 The binary component reads Boozer v3–v8 and provides `write_boozer_binary`.
 The `io` component adds suffix dispatch and NetCDF/HDF5 export. `convert` and
 `equilibrium-convert` recognize native equilibria and Boozer binaries. Boozer
-NetCDF/HDF5 input is not supported by the C++ API. Writers retain optional groups and source
-provenance; no absent group is filled with invented values.
+NetCDF/HDF5 input is not supported by the C++ API. Writers retain optional
+groups and source provenance; no absent group is filled with invented values.
+
+## Requested data groups
+
+The C++ readers can select physical groups independently of file versions.
+A new `ReadRequest` ignores every group until the caller requests it:
+
+```cpp
+#include <equilibrium/binary.hpp>
+
+equilibrium::ReadRequest request;
+request[equilibrium::DataGroup::GEOMETRY] = equilibrium::Requirement::REQUIRED;
+request[equilibrium::DataGroup::FIELDS] = equilibrium::Requirement::REQUIRED;
+request[equilibrium::DataGroup::GRID] = equilibrium::Requirement::REQUIRED;
+request[equilibrium::DataGroup::PROVENANCE] = equilibrium::Requirement::OPTIONAL;
+auto decoded = equilibrium::read_binary("equilibrium.bin", request);
+if (!decoded) throw std::runtime_error(decoded.error());
+const auto& eq = decoded.value();
+if (eq.has_provenance()) {
+    // eq.provenance is a typed optional record.
+}
+```
+
+`read(path, request)` and `read(path, format, request)` apply the same
+contract to native binary, checkpoints, NetCDF and HDF5. Required groups must
+be present and valid. Optional groups return usable data or a diagnostic;
+ignored groups skip decoding and validation where the container permits.
+Binary readers may need to scan an ignored group's framing to reach later
+data. Damage that prevents locating a required group fails the read.
+When independently valid groups disagree, required groups take precedence:
+the conflicting optional group becomes `INVALID`. Two conflicting required
+groups fail the read; two conflicting optional groups are both omitted.
+
+| Read status | Meaning |
+| --- | --- |
+| `AVAILABLE` | The requested group passed validation and is exposed |
+| `ABSENT` | The format or file has no such group |
+| `NOT_REQUESTED` | The caller ignored the group |
+| `INVALID` | The group could not be decoded or validated; `diagnostic` explains why |
+
+Inspect `eq.read_diagnostics[DataGroup::PROVENANCE]`, for example. Diagnostics
+describe the read; `has_*` queries and optional members describe the object's
+current contents if callers later mutate it. Coordinate dimensions remain
+mandatory. Native fields include seven half-grid and six full-grid arrays.
+Grid metadata can be read without exposing or validating saved input.
+Solved native profiles remain absent in the current file formats.
+
+Boozer requests use `BoozerReadOptions`. By default, geometry and strength are
+required; tracing, magnetic/maps and surface profiles are optional.
+The shared radial coordinates are always read and validated. Magnetic/maps
+and surface profiles can be read without exposing tracing data.
+`magnetic_data()` returns a typed optional reference in either case;
+complete reads retain the existing `tracing->magnetic` member.
+
+```cpp
+equilibrium::BoozerReadOptions options;
+options.spectrum = equilibrium::SpectrumStorage::REAL;
+options.groups[equilibrium::DataGroup::TRACING] = equilibrium::Requirement::REQUIRED;
+options.groups[equilibrium::DataGroup::MAGNETIC] = equilibrium::Requirement::REQUIRED;
+auto file = equilibrium::read_boozer_binary("boozer.bin", options);
+const auto& coefficients = *file.result.real_spectrum;
+```
+
+`REAL` preserves the stored real parity coefficients exactly and leaves
+complex arrays empty. Inactive `sin(0)` terms remain stored but contribute
+nothing to complex reconstruction. `COMPLEX` retains the existing representation;
+`BOTH` stores both. `has_real_spectrum()` and `has_complex_spectrum()` report
+which representations are exposed. Writers use the real representation when
+present, so a `REAL` read/write cycle preserves its coefficients. Writers
+reject partial selections that cannot form a complete output record.
+
+The existing no-options readers retain their strict complete/state-only
+contracts. Selected binary reads accept unused trailing data; they still
+require valid framing for requested groups. `detect_binary_kind(path)`
+classifies native versus Boozer input without making a capability claim.
+All binary byte-order conversion belongs to this package.
 
 ## Standalone WebAssembly converter
 

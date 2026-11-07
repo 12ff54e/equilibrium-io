@@ -53,6 +53,12 @@ now owns the historical-reader, malformed-container, codec, and installed-packag
 regression suites. cuMES retains adapter, derived-field, solver, and browser
 integration checks.
 
+Requested-group reads provide a separate admission contract: required,
+optional and ignored groups have independent validation and diagnostics.
+See [Requested data groups](../README.md#requested-data-groups). These reads
+use capabilities rather than consumer version gates and permit unused
+trailing binary data. Existing no-options APIs retain their strict behavior.
+
 ## Analysis readers
 
 The Python `equilibrium_io.load_state` API retains the former cuMES plotting
@@ -70,7 +76,9 @@ acceptance and bitwise-equality policy.
 Boozer data types moved from magnetic-coordinate to this package in 0.2.
 magnetic-coordinate retains source aliases, but consumers must rebuild because
 the C++ ABI changed. Flux lists select Boozer v8; surface profiles select v7;
-older results keep their older schema. Binary re-encoding may round spectral
-parity pairs through the existing complex/real normalization. Sampled fields,
-profiles, angle maps and metadata remain exact. No mathematical transform or
-resampling occurs during container conversion.
+older results keep their older schema. Default complex reads may round spectral
+parity pairs through the complex/real normalization. Select
+`SpectrumStorage::REAL` or `BOTH` to retain the stored real coefficients exactly.
+Writers prefer retained real arrays. Sampled fields, profiles, angle maps and
+metadata remain exact. No mathematical transform or resampling occurs during
+container conversion.

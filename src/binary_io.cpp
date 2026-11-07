@@ -1,6 +1,7 @@
 #include "equilibrium/binary.hpp"
 #include "equilibrium/checkpoint.hpp"
 #include "equilibrium/validation.hpp"
+#include "read_selection.hpp"
 #include "record_io.hpp"
 
 #include <array>
@@ -76,6 +77,22 @@ Result<Equilibrium> read_binary(const std::string& path, ReadMode mode) {
     }
     return io_detail::read_record(*make_binary_reader(), path,
                                   OutputFormat::BINARY, mode);
+}
+
+Result<Equilibrium> read_binary(const std::string& path,
+                                const ReadRequest& request) {
+    return io_detail::read_native_binary(path, request);
+}
+
+Result<BinaryKind> detect_binary_kind(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    std::array<char, 8> bytes{};
+    file.read(bytes.data(), bytes.size());
+    if (!file) return Result<BinaryKind>("missing or truncated input: " + path);
+    const std::string_view magic(bytes.data(), bytes.size());
+    if (magic == "CUMES001" || magic == "CUMECKP1") return BinaryKind::NATIVE;
+    if (magic.starts_with("MCBOOZ")) return BinaryKind::BOOZER;
+    return Result<BinaryKind>("unsupported equilibrium binary: " + path);
 }
 
 Status write_binary(const std::string& path,

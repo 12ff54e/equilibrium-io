@@ -1,9 +1,11 @@
 #pragma once
 
 #include "equilibrium/equilibrium_snapshot.hpp"
+#include "equilibrium/read_request.hpp"
 
 #include <array>
 #include <complex>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -35,6 +37,28 @@ struct BoozerMixedGrid {
     std::vector<double> b;
     std::vector<double> sqrtg_b;
     std::vector<double> b2j00;
+};
+
+// Original real parity coefficients: [surface][mode], n-major, m >= 0, n >= 0.
+// REAL reads preserve these values exactly, including inactive zero modes.
+struct RealBoozerSpectrum {
+    bool lasym = false;
+    int mmax = 0;
+    int nmax = 0;
+    std::vector<int> m;
+    std::vector<int> n;
+    std::vector<double> rmncc;
+    std::vector<double> rmnss;
+    std::vector<double> zmnsc;
+    std::vector<double> zmncs;
+    std::vector<double> numnsc;
+    std::vector<double> numncs;
+    std::vector<double> rmnsc;
+    std::vector<double> rmncs;
+    std::vector<double> zmncc;
+    std::vector<double> zmnss;
+    std::vector<double> numncc;
+    std::vector<double> numnss;
 };
 
 struct MixedGridSpectrum {
@@ -119,6 +143,8 @@ struct BoozerResult {
     std::vector<double> iota;
     BoozerMixedGrid grid;
     MixedGridSpectrum spectrum;
+    std::optional<RealBoozerSpectrum> real_spectrum;
+    ReadDiagnostics read_diagnostics;
 
     // Present in new transforms and v5 files. Absent in legacy v3/v4 files:
     // their magnetic-field polarity and axis cannot be recovered from |B|.
@@ -126,6 +152,26 @@ struct BoozerResult {
 
     // Present in new transforms and v7 files; absent in legacy v3-v6 files.
     std::optional<BoozerSurfaceProfiles> profiles;
+
+    // For selected reads with tracing ignored, magnetic data remain usable.
+    // Complete/legacy reads retain the existing tracing->magnetic location.
+    std::optional<BoozerMagneticData> independent_magnetic;
+
+    bool has_geometry() const {
+        return has_real_spectrum() || has_complex_spectrum();
+    }
+    bool has_real_spectrum() const { return real_spectrum.has_value(); }
+    bool has_complex_spectrum() const { return !spectrum.r.empty(); }
+    bool has_strength() const { return !grid.b.empty(); }
+    bool has_tracing() const { return tracing.has_value(); }
+    bool has_profiles() const { return profiles.has_value(); }
+    std::optional<std::reference_wrapper<const BoozerMagneticData>>
+    magnetic_data() const {
+        if (independent_magnetic) return std::cref(*independent_magnetic);
+        if (tracing && tracing->magnetic) return std::cref(*tracing->magnetic);
+        return std::nullopt;
+    }
+    bool has_magnetic() const { return magnetic_data().has_value(); }
 };
 
 }  // namespace equilibrium

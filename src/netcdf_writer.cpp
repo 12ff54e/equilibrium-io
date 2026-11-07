@@ -16,6 +16,8 @@
 #include "equilibrium/writer_helpers.hpp"
 #include "internal_factories.hpp"
 #include "io_common.hpp"
+#include "metadata_members.hpp"
+#include "read_selection.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -779,6 +781,23 @@ class NetcdfV1Reader final : public Reader {
     Result<EquilibriumSnapshot> read(
         const std::string& path,
         std::optional<std::reference_wrapper<RunReport>> report) override {
+        return decode(path, report, nullptr);
+    }
+    Result<Equilibrium> read(const std::string& path,
+                             const ReadRequest& request) override {
+        io_detail::ContainerReadSelection selected(request);
+        RunReport report;
+        auto state = decode(path, std::ref(report), &selected);
+        if (!state) return Result<Equilibrium>(state.error());
+        return selected.finish(std::move(state.value()), std::move(report),
+                               OutputFormat::NETCDF);
+    }
+
+   private:
+    Result<EquilibriumSnapshot> decode(
+        const std::string& path,
+        std::optional<std::reference_wrapper<RunReport>> report,
+        io_detail::ContainerReadSelection* selected) {
         int ncid = -1;
         int rc = nc_open(path.c_str(), NC_NOWRITE, &ncid);
         if (rc != NC_NOERR) {
@@ -986,82 +1005,159 @@ class NetcdfV1Reader final : public Reader {
                 if (!bytes) return fail("state byte count overflows size_t");
                 n = *n_opt;
             }
+            const auto has_metadata = [&](const auto& names) {
+                for (const char* name : names) {
+                    int id = -1;
+                    if (nc_inq_varid(ncid, name, &id) == NC_NOERR ||
+                        nc_inq_attid(ncid, NC_GLOBAL, name, &id) == NC_NOERR)
+                        return true;
+                }
+                return false;
+            };
+            const auto wants = [&](DataGroup group) {
+                return !selected || selected->selection.wants(group);
+            };
+            const auto decode_group = [&](DataGroup group, auto present,
+                                          auto decode) {
+                if (!wants(group)) return false;
+                const bool exists = present();
+                Status status;
+                if (exists || !selected) status = decode();
+                if (!selected) {
+                    if (!status) throw std::runtime_error(status.error());
+                    return true;
+                }
+                return selected->selection.accept(group, exists,
+                                                  status ? "" : status.error());
+            };
+            const auto group_fail = [](const std::string& message) {
+                return Status(message);
+            };
             EquilibriumSnapshot snapshot;
             snapshot.source_version = 1;
             snapshot.ns = static_cast<int>(ns);
             snapshot.mnmax = static_cast<int>(mnmax);
-            const char* fam_names[12] = {"rmncc", "zmnsc", "lmnsc", "rmnss",
-                                         "zmncs", "lmncs", "rmnsc", "zmncc",
-                                         "lmncc", "rmncs", "zmnss", "lmnss"};
-            int asymmetric_families = 0;
-            for (int c = 6; c < 12; ++c) {
-                int var = -1;
-                if (nc_inq_varid(ncid, fam_names[c], &var) == NC_NOERR)
-                    ++asymmetric_families;
-            }
-            if (asymmetric_families != 0 && asymmetric_families != 6)
-                return fail("incomplete asymmetric spectral families");
-            if (asymmetric_families)
-                snapshot.families.resize(EquilibriumSnapshot::ASYMMETRIC_COUNT);
+            if (!decode_group(
+                    DataGroup::GEOMETRY, [] { return true; },
+                    [&]() -> Status {
+                        auto fail = group_fail;
+                        const char* fam_names[12] = {"rmncc", "zmnsc", "lmnsc",
+                                                     "rmnss", "zmncs", "lmncs",
+                                                     "rmnsc", "zmncc", "lmncc",
+                                                     "rmncs", "zmnss", "lmnss"};
+                        int asymmetric_families = 0;
+                        for (int c = 6; c < 12; ++c) {
+                            int var = -1;
+                            if (nc_inq_varid(ncid, fam_names[c], &var) ==
+                                NC_NOERR)
+                                ++asymmetric_families;
+                        }
+                        if (asymmetric_families != 0 &&
+                            asymmetric_families != 6)
+                            return fail(
+                                "incomplete asymmetric spectral families");
+                        if (asymmetric_families)
+                            snapshot.families.resize(
+                                EquilibriumSnapshot::ASYMMETRIC_COUNT);
 
-            for (int c = 0; c < snapshot.components(); ++c) {
-                snapshot.families[c].resize(n);
-                if (!read_state_family(fam_names[c], ns_dim, mnmax_dim, ns,
-                                       snapshot.mnmax, snapshot.families[c])) {
-                    return fail("state read failed (missing/malformed " +
-                                std::string(fam_names[c]) + ")");
+                        for (int c = 0; c < snapshot.components(); ++c) {
+                            snapshot.families[c].resize(n);
+                            if (!read_state_family(
+                                    fam_names[c], ns_dim, mnmax_dim, ns,
+                                    snapshot.mnmax, snapshot.families[c])) {
+                                return fail(
+                                    "state read failed (missing/malformed " +
+                                    std::string(fam_names[c]) + ")");
+                            }
+                        }
+
+                        return {};
+                    }))
+                snapshot.families.clear();
+            if (wants(DataGroup::FIELDS)) {
+                int present_fields = 0;
+                for (const char* name : HALF_FIELD_NAMES) {
+                    int vid = -1;
+                    present_fields +=
+                        nc_inq_varid(ncid, name, &vid) == NC_NOERR ? 1 : 0;
                 }
-            }
-            int present_fields = 0;
-            for (const char* name : HALF_FIELD_NAMES) {
-                int vid = -1;
-                present_fields +=
-                    nc_inq_varid(ncid, name, &vid) == NC_NOERR ? 1 : 0;
-            }
-            for (const char* name : FULL_FIELD_NAMES) {
-                int vid = -1;
-                present_fields +=
-                    nc_inq_varid(ncid, name, &vid) == NC_NOERR ? 1 : 0;
-            }
-            if (present_fields != 0) {
-                constexpr int EXPECTED_FIELDS =
-                    static_cast<int>(EquilibriumSnapshot::HALF_FIELD_COUNT) +
-                    static_cast<int>(EquilibriumSnapshot::FULL_FIELD_COUNT);
-                if (present_fields != EXPECTED_FIELDS) {
-                    return fail("incomplete derived-field datasets");
+                for (const char* name : FULL_FIELD_NAMES) {
+                    int vid = -1;
+                    present_fields +=
+                        nc_inq_varid(ncid, name, &vid) == NC_NOERR ? 1 : 0;
                 }
-                int ns_half_dim = -1, theta_dim = -1, zeta_dim = -1;
-                size_t ns_half = 0, ntheta = 0, nzeta = 0;
-                if (!get_dim("ns_half", ns_half_dim, ns_half) ||
-                    !get_dim("n_theta", theta_dim, ntheta) ||
-                    !get_dim("n_zeta", zeta_dim, nzeta) || ns_half != ns - 1 ||
-                    ntheta < 1 || nzeta < 1 || ntheta > INT_MAX ||
-                    nzeta > INT_MAX) {
-                    return fail("malformed derived-field dimensions");
-                }
-                const int half_dims[3] = {ns_half_dim, zeta_dim, theta_dim};
-                const int full_dims[3] = {ns_dim, zeta_dim, theta_dim};
-                const size_t half_extents[3] = {ns_half, nzeta, ntheta};
-                const size_t full_extents[3] = {ns, nzeta, ntheta};
-                snapshot.ntheta = static_cast<int>(ntheta);
-                snapshot.nzeta = static_cast<int>(nzeta);
-                for (int c = 0; c < EquilibriumSnapshot::HALF_FIELD_COUNT;
-                     ++c) {
-                    if (!read_field_double(HALF_FIELD_NAMES[c], half_dims,
-                                           half_extents,
-                                           snapshot.half_fields[c])) {
-                        return fail("malformed half-grid field dataset (" +
-                                    std::string(HALF_FIELD_NAMES[c]) + ")");
-                    }
-                }
-                for (int c = 0; c < EquilibriumSnapshot::FULL_FIELD_COUNT;
-                     ++c) {
-                    if (!read_field_double(FULL_FIELD_NAMES[c], full_dims,
-                                           full_extents,
-                                           snapshot.full_fields[c])) {
-                        return fail("malformed full-grid field dataset (" +
-                                    std::string(FULL_FIELD_NAMES[c]) + ")");
-                    }
+
+                if (!decode_group(
+                        DataGroup::FIELDS, [&] { return present_fields != 0; },
+                        [&]() -> Status {
+                            auto fail = group_fail;
+                            if (present_fields != 0) {
+                                constexpr int EXPECTED_FIELDS =
+                                    static_cast<int>(
+                                        EquilibriumSnapshot::HALF_FIELD_COUNT) +
+                                    static_cast<int>(
+                                        EquilibriumSnapshot::FULL_FIELD_COUNT);
+                                if (present_fields != EXPECTED_FIELDS) {
+                                    return fail(
+                                        "incomplete derived-field datasets");
+                                }
+                                int ns_half_dim = -1, theta_dim = -1,
+                                    zeta_dim = -1;
+                                size_t ns_half = 0, ntheta = 0, nzeta = 0;
+                                if (!get_dim("ns_half", ns_half_dim, ns_half) ||
+                                    !get_dim("n_theta", theta_dim, ntheta) ||
+                                    !get_dim("n_zeta", zeta_dim, nzeta) ||
+                                    ns_half != ns - 1 || ntheta < 1 ||
+                                    nzeta < 1 || ntheta > INT_MAX ||
+                                    nzeta > INT_MAX) {
+                                    return fail(
+                                        "malformed derived-field dimensions");
+                                }
+                                const int half_dims[3] = {ns_half_dim, zeta_dim,
+                                                          theta_dim};
+                                const int full_dims[3] = {ns_dim, zeta_dim,
+                                                          theta_dim};
+                                const size_t half_extents[3] = {ns_half, nzeta,
+                                                                ntheta};
+                                const size_t full_extents[3] = {ns, nzeta,
+                                                                ntheta};
+                                snapshot.ntheta = static_cast<int>(ntheta);
+                                snapshot.nzeta = static_cast<int>(nzeta);
+                                for (int c = 0;
+                                     c < EquilibriumSnapshot::HALF_FIELD_COUNT;
+                                     ++c) {
+                                    if (!read_field_double(
+                                            HALF_FIELD_NAMES[c], half_dims,
+                                            half_extents,
+                                            snapshot.half_fields[c])) {
+                                        return fail(
+                                            "malformed half-grid field dataset "
+                                            "(" +
+                                            std::string(HALF_FIELD_NAMES[c]) +
+                                            ")");
+                                    }
+                                }
+                                for (int c = 0;
+                                     c < EquilibriumSnapshot::FULL_FIELD_COUNT;
+                                     ++c) {
+                                    if (!read_field_double(
+                                            FULL_FIELD_NAMES[c], full_dims,
+                                            full_extents,
+                                            snapshot.full_fields[c])) {
+                                        return fail(
+                                            "malformed full-grid field dataset "
+                                            "(" +
+                                            std::string(FULL_FIELD_NAMES[c]) +
+                                            ")");
+                                    }
+                                }
+                            }
+
+                            return {};
+                        })) {
+                    snapshot.ntheta = snapshot.nzeta = 0;
+                    for (auto& values : snapshot.half_fields) values.clear();
+                    for (auto& values : snapshot.full_fields) values.clear();
                 }
             }
             if (report) {
@@ -1088,433 +1184,557 @@ class NetcdfV1Reader final : public Reader {
                     return nc_get_att_text(ncid, NC_GLOBAL, name, &out[0]) ==
                            NC_NOERR;
                 };
-                int precision = 0, status = 0, total = 0, dirty = 0;
-                if (!read_scalar_int("precision", precision) ||
-                    !read_scalar_int("status", status) ||
-                    !read_scalar_int("total_iterations", total) ||
-                    !read_scalar_int("build_dirty", dirty)) {
-                    return fail("missing run outcome variables");
-                }
-                // Closed-range validation of the serialized scalars (handoff
-                // §4).
-                if (precision < 0 || precision > 1) {
-                    return fail("invalid precision scalar");
-                }
-                if (status < 0 || status > 4) {
-                    return fail("invalid run status scalar");
-                }
-                if (total < 0) {
-                    return fail("negative total iteration count");
-                }
-                if (dirty != 0 && dirty != 1) {
-                    return fail("invalid build_dirty scalar");
-                }
-                parsed_report.status = static_cast<RunStatus>(status);
-                parsed_report.total_effective_iterations = total;
-                parsed_report.build.dirty = (dirty != 0);
-                parsed_report.build.scalar_type =
-                    (precision == 0) ? "double" : "float";
-                if (!get_str("revision", parsed_report.build.revision) ||
-                    !get_str("build_type", parsed_report.build.build_type) ||
-                    !get_str("precision_policy",
-                             parsed_report.build.precision_policy) ||
-                    !get_str("compile_flags",
-                             parsed_report.build.compile_flags) ||
-                    !get_str("source_path", parsed_report.input.source_path) ||
-                    !get_str("source_hash", parsed_report.input.source_hash) ||
-                    !get_str("gpu_name", parsed_report.runtime.gpu_name) ||
-                    !get_str("driver", parsed_report.runtime.driver) ||
-                    !get_str("runtime", parsed_report.runtime.runtime) ||
-                    !get_str("toolkit", parsed_report.runtime.toolkit)) {
-                    return fail("missing provenance attributes");
-                }
-                int nstages_dim = -1, nrestarts_dim = -1;
-                size_t nstages = 0, nrestarts = 0;
-                if (!get_dim("nstages", nstages_dim, nstages) ||
-                    !get_dim("nrestarts", nrestarts_dim, nrestarts)) {
-                    return fail("missing stage dimensions");
-                }
-                // Documented stage/restart resource caps (handoff §4): a
-                // hostile dimension must fail before the host allocates it.
-                if (nstages > equilibrium::io_detail::MAX_STAGE_COUNT ||
-                    nrestarts > equilibrium::io_detail::MAX_STAGE_COUNT) {
-                    return fail(
-                        "stage/restart dimensions exceed the resource cap");
-                }
-                std::vector<int> stage_ns(nstages), stage_iter(nstages),
-                    stage_conv(nstages), rst_off(nstages);
-                std::vector<double> st_fsqr(nstages), st_fsqz(nstages),
-                    st_fsql(nstages);
-                std::vector<int> rst_iter(nrestarts);
-                if (!read_vector_int("stage_ns", nstages_dim, nstages,
-                                     stage_ns) ||
-                    !read_vector_int("stage_iterations", nstages_dim, nstages,
-                                     stage_iter) ||
-                    !read_vector_int("stage_converged", nstages_dim, nstages,
-                                     stage_conv) ||
-                    !read_vector_int("restart_stage_offset", nstages_dim,
-                                     nstages, rst_off) ||
-                    !read_vector_double("stage_fsqr", nstages_dim, nstages,
-                                        st_fsqr) ||
-                    !read_vector_double("stage_fsqz", nstages_dim, nstages,
-                                        st_fsqz) ||
-                    !read_vector_double("stage_fsql", nstages_dim, nstages,
-                                        st_fsql)) {
-                    return fail("stage history read failed");
-                }
-                // restart_iteration must exist whenever nrestarts > 0, and must
-                // pass the same rank/type/extent checks whenever it exists.
-                {
-                    int vid = -1;
-                    if (nc_inq_varid(ncid, "restart_iteration", &vid) ==
-                        NC_NOERR) {
-                        if (!read_vector_int("restart_iteration", nrestarts_dim,
-                                             nrestarts, rst_iter)) {
-                            return fail("restart history read failed");
+                decode_group(
+                    DataGroup::PROVENANCE,
+                    [&] { return has_metadata(io_detail::PROVENANCE_MEMBERS); },
+                    [&]() -> Status {
+                        auto fail = group_fail;
+                        int precision = 0, status = 0, total = 0, dirty = 0;
+                        if (!read_scalar_int("precision", precision) ||
+                            !read_scalar_int("status", status) ||
+                            !read_scalar_int("total_iterations", total) ||
+                            !read_scalar_int("build_dirty", dirty)) {
+                            return fail("missing run outcome variables");
                         }
-                    } else if (nrestarts > 0) {
-                        return fail("restart history read failed");
-                    }
-                }
-                {
-                    const std::string off_err =
-                        validate_restart_offsets(rst_off, nstages, nrestarts);
-                    if (!off_err.empty()) {
-                        return fail("invalid restart offsets: " + off_err);
-                    }
-                }
-                for (size_t g = 0; g < nstages; ++g) {
-                    if (stage_ns[g] <= 0) {
-                        return fail("nonpositive stage surface count");
-                    }
-                    if (stage_iter[g] < 0) {
-                        return fail("negative stage iteration count");
-                    }
-                    if (stage_conv[g] != 0 && stage_conv[g] != 1) {
-                        return fail("invalid stage_converged value");
-                    }
-                }
-                for (int iteration : rst_iter) {
-                    if (iteration < 0) {
-                        return fail("negative restart iteration");
-                    }
-                }
-                for (size_t g = 0; g < nstages; ++g) {
-                    StageReport st;
-                    st.ns = stage_ns[g];
-                    st.effective_iterations = stage_iter[g];
-                    st.converged = (stage_conv[g] != 0);
-                    st.final_residual.fsqr = st_fsqr[g];
-                    st.final_residual.fsqz = st_fsqz[g];
-                    st.final_residual.fsql = st_fsql[g];
-                    const size_t begin = (size_t)rst_off[g];
-                    const size_t end =
-                        (g + 1 < nstages) ? (size_t)rst_off[g + 1] : nrestarts;
-                    for (size_t k = begin; k < end; ++k) {
-                        st.restarts.push_back(RestartEvent{rst_iter[k]});
-                    }
-                    parsed_report.stages.push_back(std::move(st));
-                }
-                // ---- embedded normalized-input record ----
-                // All-or-nothing: containers written before the record carry
-                // none of its fields (the record stays default-empty); when the
-                // first scalar exists, the FULL record is required and every
-                // read gets the exact-rank/type/extent hardening above.
-                {
-                    int probe = -1;
-                    if (nc_inq_varid(ncid, "mpol", &probe) == NC_NOERR) {
-                        InputParams ip;
-                        if (!read_scalar_int("mpol", ip.mpol) ||
-                            !read_scalar_int("ntor", ip.ntor) ||
-                            !read_scalar_int("nfp", ip.nfp) ||
-                            !read_scalar_int("ntheta", ip.ntheta) ||
-                            !read_scalar_int("nzeta", ip.nzeta) ||
-                            !read_scalar_int("ncurr", ip.ncurr) ||
-                            !read_scalar_double("delt", ip.delt) ||
-                            !read_scalar_double("phiedge", ip.phiedge) ||
-                            !read_scalar_double("pres_scale", ip.pres_scale) ||
-                            !read_scalar_double("adiabatic_index",
-                                                ip.adiabatic_index) ||
-                            !read_scalar_double("spres_ped", ip.spres_ped) ||
-                            !read_scalar_double("bloat", ip.bloat) ||
-                            !read_scalar_double("curtor", ip.curtor) ||
-                            !read_scalar_double("tcon0", ip.tcon0)) {
-                            return fail("malformed embedded input record");
+                        // Closed-range validation of the serialized scalars
+                        // (handoff §4).
+                        if (precision < 0 || precision > 1) {
+                            return fail("invalid precision scalar");
+                        }
+                        if (status < 0 || status > 4) {
+                            return fail("invalid run status scalar");
+                        }
+                        if (total < 0) {
+                            return fail("negative total iteration count");
+                        }
+                        if (dirty != 0 && dirty != 1) {
+                            return fail("invalid build_dirty scalar");
+                        }
+                        parsed_report.status = static_cast<RunStatus>(status);
+                        parsed_report.total_effective_iterations = total;
+                        parsed_report.build.dirty = (dirty != 0);
+                        parsed_report.build.scalar_type =
+                            (precision == 0) ? "double" : "float";
+                        if (!get_str("revision",
+                                     parsed_report.build.revision) ||
+                            !get_str("build_type",
+                                     parsed_report.build.build_type) ||
+                            !get_str("precision_policy",
+                                     parsed_report.build.precision_policy) ||
+                            !get_str("compile_flags",
+                                     parsed_report.build.compile_flags) ||
+                            !get_str("source_path",
+                                     parsed_report.input.source_path) ||
+                            !get_str("source_hash",
+                                     parsed_report.input.source_hash) ||
+                            !get_str("gpu_name",
+                                     parsed_report.runtime.gpu_name) ||
+                            !get_str("driver", parsed_report.runtime.driver) ||
+                            !get_str("runtime",
+                                     parsed_report.runtime.runtime) ||
+                            !get_str("toolkit",
+                                     parsed_report.runtime.toolkit)) {
+                            return fail("missing provenance attributes");
+                        }
+                        int nstages_dim = -1, nrestarts_dim = -1;
+                        size_t nstages = 0, nrestarts = 0;
+                        if (!get_dim("nstages", nstages_dim, nstages) ||
+                            !get_dim("nrestarts", nrestarts_dim, nrestarts)) {
+                            return fail("missing stage dimensions");
+                        }
+                        // Documented stage/restart resource caps (handoff §4):
+                        // a hostile dimension must fail before the host
+                        // allocates it.
+                        if (nstages > equilibrium::io_detail::MAX_STAGE_COUNT ||
+                            nrestarts >
+                                equilibrium::io_detail::MAX_STAGE_COUNT) {
+                            return fail(
+                                "stage/restart dimensions exceed the resource "
+                                "cap");
+                        }
+                        std::vector<int> stage_ns(nstages), stage_iter(nstages),
+                            stage_conv(nstages), rst_off(nstages);
+                        std::vector<double> st_fsqr(nstages), st_fsqz(nstages),
+                            st_fsql(nstages);
+                        std::vector<int> rst_iter(nrestarts);
+                        if (!read_vector_int("stage_ns", nstages_dim, nstages,
+                                             stage_ns) ||
+                            !read_vector_int("stage_iterations", nstages_dim,
+                                             nstages, stage_iter) ||
+                            !read_vector_int("stage_converged", nstages_dim,
+                                             nstages, stage_conv) ||
+                            !read_vector_int("restart_stage_offset",
+                                             nstages_dim, nstages, rst_off) ||
+                            !read_vector_double("stage_fsqr", nstages_dim,
+                                                nstages, st_fsqr) ||
+                            !read_vector_double("stage_fsqz", nstages_dim,
+                                                nstages, st_fsqz) ||
+                            !read_vector_double("stage_fsql", nstages_dim,
+                                                nstages, st_fsql)) {
+                            return fail("stage history read failed");
+                        }
+                        // restart_iteration must exist whenever nrestarts > 0,
+                        // and must pass the same rank/type/extent checks
+                        // whenever it exists.
+                        {
+                            int vid = -1;
+                            if (nc_inq_varid(ncid, "restart_iteration", &vid) ==
+                                NC_NOERR) {
+                                if (!read_vector_int("restart_iteration",
+                                                     nrestarts_dim, nrestarts,
+                                                     rst_iter)) {
+                                    return fail("restart history read failed");
+                                }
+                            } else if (nrestarts > 0) {
+                                return fail("restart history read failed");
+                            }
                         }
                         {
-                            int variable_id = -1;
-                            if (nc_inq_varid(ncid, "lfreeb", &variable_id) ==
+                            const std::string off_err =
+                                validate_restart_offsets(rst_off, nstages,
+                                                         nrestarts);
+                            if (!off_err.empty()) {
+                                return fail("invalid restart offsets: " +
+                                            off_err);
+                            }
+                        }
+                        for (size_t g = 0; g < nstages; ++g) {
+                            if (stage_ns[g] <= 0) {
+                                return fail("nonpositive stage surface count");
+                            }
+                            if (stage_iter[g] < 0) {
+                                return fail("negative stage iteration count");
+                            }
+                            if (stage_conv[g] != 0 && stage_conv[g] != 1) {
+                                return fail("invalid stage_converged value");
+                            }
+                        }
+                        for (int iteration : rst_iter) {
+                            if (iteration < 0) {
+                                return fail("negative restart iteration");
+                            }
+                        }
+                        for (size_t g = 0; g < nstages; ++g) {
+                            StageReport st;
+                            st.ns = stage_ns[g];
+                            st.effective_iterations = stage_iter[g];
+                            st.converged = (stage_conv[g] != 0);
+                            st.final_residual.fsqr = st_fsqr[g];
+                            st.final_residual.fsqz = st_fsqz[g];
+                            st.final_residual.fsql = st_fsql[g];
+                            const size_t begin = (size_t)rst_off[g];
+                            const size_t end = (g + 1 < nstages)
+                                                   ? (size_t)rst_off[g + 1]
+                                                   : nrestarts;
+                            for (size_t k = begin; k < end; ++k) {
+                                st.restarts.push_back(
+                                    RestartEvent{rst_iter[k]});
+                            }
+                            parsed_report.stages.push_back(std::move(st));
+                        }
+
+                        return {};
+                    });
+                if (selected) {
+                    decode_group(
+                        DataGroup::GRID,
+                        [&] { return has_metadata(io_detail::GRID_MEMBERS); },
+                        [&]() -> Status {
+                            GridMetadata grid;
+                            if (!read_scalar_int("mpol", grid.mpol) ||
+                                !read_scalar_int("ntor", grid.ntor) ||
+                                !read_scalar_int("nfp", grid.nfp) ||
+                                !read_scalar_int("ntheta", grid.ntheta) ||
+                                !read_scalar_int("nzeta", grid.nzeta))
+                                return Status(
+                                    "missing or malformed grid metadata");
+                            selected->grid = grid;
+                            return {};
+                        });
+                }
+                decode_group(
+                    DataGroup::INPUT,
+                    [&] { return has_metadata(io_detail::INPUT_MEMBERS); },
+                    [&]() -> Status {
+                        auto fail = group_fail;
+                        int input_lasym = !selected && snapshot.lasym() ? 1 : 0;
+                        if (selected) {
+                            int tag = -1;
+                            const bool present =
+                                nc_inq_varid(ncid, "lasym", &tag) == NC_NOERR;
+                            if (present &&
+                                (!read_scalar_int("lasym", input_lasym) ||
+                                 (input_lasym != 0 && input_lasym != 1)))
+                                return Status(
+                                    "invalid saved input symmetry tag");
+                        }
+
+                        // ---- embedded normalized-input record ----
+                        // All-or-nothing: containers written before the record
+                        // carry none of its fields (the record stays
+                        // default-empty); when the first scalar exists, the
+                        // FULL record is required and every read gets the
+                        // exact-rank/type/extent hardening above.
+                        {
+                            int probe = -1;
+                            if (nc_inq_varid(ncid, "mpol", &probe) ==
                                 NC_NOERR) {
-                                int lfreeb = 0;
-                                if (!read_scalar_int("lfreeb", lfreeb)) {
+                                InputParams ip;
+                                if (!read_scalar_int("mpol", ip.mpol) ||
+                                    !read_scalar_int("ntor", ip.ntor) ||
+                                    !read_scalar_int("nfp", ip.nfp) ||
+                                    !read_scalar_int("ntheta", ip.ntheta) ||
+                                    !read_scalar_int("nzeta", ip.nzeta) ||
+                                    !read_scalar_int("ncurr", ip.ncurr) ||
+                                    !read_scalar_double("delt", ip.delt) ||
+                                    !read_scalar_double("phiedge",
+                                                        ip.phiedge) ||
+                                    !read_scalar_double("pres_scale",
+                                                        ip.pres_scale) ||
+                                    !read_scalar_double("adiabatic_index",
+                                                        ip.adiabatic_index) ||
+                                    !read_scalar_double("spres_ped",
+                                                        ip.spres_ped) ||
+                                    !read_scalar_double("bloat", ip.bloat) ||
+                                    !read_scalar_double("curtor", ip.curtor) ||
+                                    !read_scalar_double("tcon0", ip.tcon0)) {
                                     return fail(
                                         "malformed embedded input record");
                                 }
-                                ip.lfreeb = (lfreeb != 0);
-                            }
-                            if (nc_inq_varid(ncid, "nvacskip", &variable_id) ==
-                                    NC_NOERR &&
-                                !read_scalar_int("nvacskip", ip.nvacskip)) {
-                                return fail("malformed embedded input record");
-                            }
-                            get_str("mgrid_file", ip.mgrid_file);
-                            get_str("coils_file", ip.coils_file);
-                            get_str("makegrid_parameters_file",
-                                    ip.makegrid_parameters_file);
-                            if (nc_inq_varid(ncid,
-                                             "makegrid_parameters_present",
-                                             &variable_id) == NC_NOERR) {
-                                int present = 0;
-                                if (!read_scalar_int(
-                                        "makegrid_parameters_present",
-                                        present)) {
-                                    return fail(
-                                        "malformed embedded input record");
-                                }
-                                if (present != 0) {
-                                    MakegridParametersSpec parameters;
-                                    int normalize = 0;
-                                    int symmetry = 0;
-                                    if (!read_scalar_int(
-                                            "makegrid_normalize_by_currents",
-                                            normalize) ||
-                                        !read_scalar_int(
-                                            "makegrid_assume_stellarator_"
-                                            "symmetry",
-                                            symmetry) ||
-                                        !read_scalar_int(
-                                            "makegrid_number_of_field_periods",
-                                            parameters
-                                                .number_of_field_periods) ||
-                                        !read_scalar_double(
-                                            "makegrid_r_grid_minimum",
-                                            parameters.r_grid_minimum) ||
-                                        !read_scalar_double(
-                                            "makegrid_r_grid_maximum",
-                                            parameters.r_grid_maximum) ||
-                                        !read_scalar_int(
-                                            "makegrid_number_of_r_grid_points",
-                                            parameters
-                                                .number_of_r_grid_points) ||
-                                        !read_scalar_double(
-                                            "makegrid_z_grid_minimum",
-                                            parameters.z_grid_minimum) ||
-                                        !read_scalar_double(
-                                            "makegrid_z_grid_maximum",
-                                            parameters.z_grid_maximum) ||
-                                        !read_scalar_int(
-                                            "makegrid_number_of_z_grid_points",
-                                            parameters
-                                                .number_of_z_grid_points) ||
-                                        !read_scalar_int(
-                                            "makegrid_number_of_phi_grid_"
-                                            "points",
-                                            parameters
-                                                .number_of_phi_grid_points)) {
+                                {
+                                    int variable_id = -1;
+                                    if (nc_inq_varid(ncid, "lfreeb",
+                                                     &variable_id) ==
+                                        NC_NOERR) {
+                                        int lfreeb = 0;
+                                        if (!read_scalar_int("lfreeb",
+                                                             lfreeb)) {
+                                            return fail(
+                                                "malformed embedded input "
+                                                "record");
+                                        }
+                                        ip.lfreeb = (lfreeb != 0);
+                                    }
+                                    if (nc_inq_varid(ncid, "nvacskip",
+                                                     &variable_id) ==
+                                            NC_NOERR &&
+                                        !read_scalar_int("nvacskip",
+                                                         ip.nvacskip)) {
                                         return fail(
                                             "malformed embedded input record");
                                     }
-                                    parameters.normalize_by_currents =
-                                        normalize != 0;
-                                    parameters.assume_stellarator_symmetry =
-                                        symmetry != 0;
-                                    ip.embedded_makegrid_parameters =
-                                        parameters;
+                                    get_str("mgrid_file", ip.mgrid_file);
+                                    get_str("coils_file", ip.coils_file);
+                                    get_str("makegrid_parameters_file",
+                                            ip.makegrid_parameters_file);
+                                    if (nc_inq_varid(
+                                            ncid, "makegrid_parameters_present",
+                                            &variable_id) == NC_NOERR) {
+                                        int present = 0;
+                                        if (!read_scalar_int(
+                                                "makegrid_parameters_present",
+                                                present)) {
+                                            return fail(
+                                                "malformed embedded input "
+                                                "record");
+                                        }
+                                        if (present != 0) {
+                                            MakegridParametersSpec parameters;
+                                            int normalize = 0;
+                                            int symmetry = 0;
+                                            if (!read_scalar_int(
+                                                    "makegrid_normalize_by_"
+                                                    "currents",
+                                                    normalize) ||
+                                                !read_scalar_int(
+                                                    "makegrid_assume_"
+                                                    "stellarator_"
+                                                    "symmetry",
+                                                    symmetry) ||
+                                                !read_scalar_int(
+                                                    "makegrid_number_of_field_"
+                                                    "periods",
+                                                    parameters
+                                                        .number_of_field_periods) ||
+                                                !read_scalar_double(
+                                                    "makegrid_r_grid_minimum",
+                                                    parameters
+                                                        .r_grid_minimum) ||
+                                                !read_scalar_double(
+                                                    "makegrid_r_grid_maximum",
+                                                    parameters
+                                                        .r_grid_maximum) ||
+                                                !read_scalar_int(
+                                                    "makegrid_number_of_r_grid_"
+                                                    "points",
+                                                    parameters
+                                                        .number_of_r_grid_points) ||
+                                                !read_scalar_double(
+                                                    "makegrid_z_grid_minimum",
+                                                    parameters
+                                                        .z_grid_minimum) ||
+                                                !read_scalar_double(
+                                                    "makegrid_z_grid_maximum",
+                                                    parameters
+                                                        .z_grid_maximum) ||
+                                                !read_scalar_int(
+                                                    "makegrid_number_of_z_grid_"
+                                                    "points",
+                                                    parameters
+                                                        .number_of_z_grid_points) ||
+                                                !read_scalar_int(
+                                                    "makegrid_number_of_phi_"
+                                                    "grid_"
+                                                    "points",
+                                                    parameters
+                                                        .number_of_phi_grid_points)) {
+                                                return fail(
+                                                    "malformed embedded input "
+                                                    "record");
+                                            }
+                                            parameters.normalize_by_currents =
+                                                normalize != 0;
+                                            parameters
+                                                .assume_stellarator_symmetry =
+                                                symmetry != 0;
+                                            ip.embedded_makegrid_parameters =
+                                                parameters;
+                                        }
+                                    }
                                 }
+                                // Arrays: an ABSENT variable means an empty
+                                // vector (the writer omits empty arrays to
+                                // avoid 0-length dims); a present one must pass
+                                // the strict read.
+                                {
+                                    auto read_optional =
+                                        [&](const char* dname,
+                                            const char* vname,
+                                            std::vector<double>& out) -> bool {
+                                        int vid = -1;
+                                        if (nc_inq_varid(ncid, vname, &vid) !=
+                                            NC_NOERR) {
+                                            return true;  // absent -> empty
+                                        }
+                                        int dim = -1;
+                                        size_t n = 0;
+                                        if (!get_dim(dname, dim, n))
+                                            return false;
+                                        return read_vector_double(vname, dim, n,
+                                                                  out);
+                                    };
+                                    if (!read_optional("n_am", "am", ip.am) ||
+                                        !read_optional("n_ac", "ac", ip.ac) ||
+                                        !read_optional("n_ai", "ai", ip.ai) ||
+                                        !read_optional("n_aphi", "aphi",
+                                                       ip.aphi) ||
+                                        !read_optional("n_raxis", "raxis_c",
+                                                       ip.raxis_c) ||
+                                        !read_optional("n_zaxis", "zaxis_s",
+                                                       ip.zaxis_s) ||
+                                        !read_optional("n_extcur", "extcur",
+                                                       ip.extcur)) {
+                                        return fail(
+                                            "malformed embedded input record");
+                                    }
+                                }
+                                // The input stage arrays are optional as a
+                                // whole (the writer omits them for an empty
+                                // stage list).
+                                {
+                                    int vid = -1;
+                                    if (nc_inq_varid(ncid, "stage_in_ns",
+                                                     &vid) == NC_NOERR) {
+                                        int dim_nstages_in = -1;
+                                        size_t nstages_in = 0;
+                                        if (!get_dim("nstages_in",
+                                                     dim_nstages_in,
+                                                     nstages_in)) {
+                                            return fail(
+                                                "malformed embedded input "
+                                                "record");
+                                        }
+                                        if (nstages_in >
+                                            equilibrium::io_detail::
+                                                MAX_STAGE_COUNT) {
+                                            return fail(
+                                                "embedded input stage count "
+                                                "exceeds the resource cap");
+                                        }
+                                        std::vector<int> stg_in_ns(nstages_in),
+                                            stg_max_iter(nstages_in);
+                                        std::vector<double> stg_ftol(
+                                            nstages_in);
+                                        if (!read_vector_int(
+                                                "stage_in_ns", dim_nstages_in,
+                                                nstages_in, stg_in_ns) ||
+                                            !read_vector_int("stage_max_iter",
+                                                             dim_nstages_in,
+                                                             nstages_in,
+                                                             stg_max_iter) ||
+                                            !read_vector_double(
+                                                "stage_ftol", dim_nstages_in,
+                                                nstages_in, stg_ftol)) {
+                                            return fail(
+                                                "malformed embedded input "
+                                                "record");
+                                        }
+                                        for (size_t g = 0; g < nstages_in;
+                                             ++g) {
+                                            InputStage st;
+                                            st.ns = stg_in_ns[g];
+                                            st.max_iter = stg_max_iter[g];
+                                            st.ftol = stg_ftol[g];
+                                            ip.stages.push_back(st);
+                                        }
+                                    }
+                                }
+                                // Boundary + folded (always part of a present
+                                // record).
+                                int dim_nrbc = -1, dim_nzbs = -1, dim_mpol = -1,
+                                    dim_ntorp1 = -1;
+                                size_t nrbc = 0, nzbs = 0, mpol = 0, ntorp1 = 0;
+                                if (!get_dim("nrbc", dim_nrbc, nrbc) ||
+                                    !get_dim("nzbs", dim_nzbs, nzbs) ||
+                                    !get_dim("n_mpol", dim_mpol, mpol) ||
+                                    !get_dim("n_ntorp1", dim_ntorp1, ntorp1)) {
+                                    return fail(
+                                        "malformed embedded input record");
+                                }
+                                if (!read_vector_int("rbc_m", dim_nrbc, nrbc,
+                                                     ip.rbc_m) ||
+                                    !read_vector_int("rbc_n", dim_nrbc, nrbc,
+                                                     ip.rbc_n) ||
+                                    !read_vector_double("rbc_value", dim_nrbc,
+                                                        nrbc, ip.rbc_value) ||
+                                    !read_vector_int("zbs_m", dim_nzbs, nzbs,
+                                                     ip.zbs_m) ||
+                                    !read_vector_int("zbs_n", dim_nzbs, nzbs,
+                                                     ip.zbs_n) ||
+                                    !read_vector_double("zbs_value", dim_nzbs,
+                                                        nzbs, ip.zbs_value) ||
+                                    !read_matrix_double("rbcc", dim_mpol,
+                                                        dim_ntorp1, mpol,
+                                                        ntorp1, ip.rbcc) ||
+                                    !read_matrix_double("rbss", dim_mpol,
+                                                        dim_ntorp1, mpol,
+                                                        ntorp1, ip.rbss) ||
+                                    !read_matrix_double("zbsc", dim_mpol,
+                                                        dim_ntorp1, mpol,
+                                                        ntorp1, ip.zbsc) ||
+                                    !read_matrix_double("zbcs", dim_mpol,
+                                                        dim_ntorp1, mpol,
+                                                        ntorp1, ip.zbcs)) {
+                                    return fail(
+                                        "malformed embedded input record");
+                                }
+                                // The schema tag is informational; an absent or
+                                // unreadable one keeps the default.
+                                // The schema/profile-type tags are
+                                // informational; an absent one keeps the
+                                // default (an older container lacks the profile
+                                // types -> "power_series").
+                                std::string schema_tag;
+                                if (get_str("schema", schema_tag))
+                                    ip.schema = schema_tag;
+                                std::string pmass_tag, piota_tag, pcurr_tag;
+                                if (get_str("pmass_type", pmass_tag))
+                                    ip.pmass_type = pmass_tag;
+                                if (get_str("piota_type", piota_tag))
+                                    ip.piota_type = piota_tag;
+                                if (get_str("pcurr_type", pcurr_tag))
+                                    ip.pcurr_type = pcurr_tag;
+                                std::string pflux_tag;
+                                if (get_str("pflux_type", pflux_tag))
+                                    ip.pflux_type = pflux_tag;
+                                parsed_report.input_params = std::move(ip);
                             }
                         }
-                        // Arrays: an ABSENT variable means an empty vector (the
-                        // writer omits empty arrays to avoid 0-length dims); a
-                        // present one must pass the strict read.
-                        {
-                            auto read_optional =
-                                [&](const char* dname, const char* vname,
-                                    std::vector<double>& out) -> bool {
-                                int vid = -1;
-                                if (nc_inq_varid(ncid, vname, &vid) !=
-                                    NC_NOERR) {
-                                    return true;  // absent -> empty
-                                }
+                        if (input_lasym == 1) {
+                            auto& ip = parsed_report.input_params;
+                            int lasym = 0;
+                            if (!read_scalar_int("lasym", lasym) ||
+                                lasym != 1 || ip.mpol < 1 || ip.ntor < 0) {
+                                return fail(
+                                    "missing typed asymmetric input record");
+                            }
+                            ip.lasym = true;
+                            int dim_mpol = -1, dim_ntorp1 = -1;
+                            size_t mpol = 0, ntorp1 = 0;
+                            if (!get_dim("n_mpol", dim_mpol, mpol) ||
+                                !get_dim("n_ntorp1", dim_ntorp1, ntorp1) ||
+                                mpol != (size_t)ip.mpol ||
+                                ntorp1 != (size_t)ip.ntor + 1) {
+                                return fail(
+                                    "malformed asymmetric input dimensions");
+                            }
+                            const auto modes = checked_mul(mpol, ntorp1);
+                            if (!modes ||
+                                *modes > io_detail::MAX_INPUT_PARAMS_VECTOR) {
+                                return fail(
+                                    "asymmetric input dimensions exceed "
+                                    "resource cap");
+                            }
+                            auto read_harmonics = [&](const char* name,
+                                                      std::vector<int>& m,
+                                                      std::vector<int>& n,
+                                                      std::vector<double>&
+                                                          values) {
+                                const std::string base(name);
                                 int dim = -1;
-                                size_t n = 0;
-                                if (!get_dim(dname, dim, n)) return false;
-                                return read_vector_double(vname, dim, n, out);
+                                if (nc_inq_dimid(ncid, ("n_" + base).c_str(),
+                                                 &dim) == NC_EBADDIM) {
+                                    int vid = -1;
+                                    return nc_inq_varid(ncid,
+                                                        (base + "_m").c_str(),
+                                                        &vid) == NC_ENOTVAR &&
+                                           nc_inq_varid(ncid,
+                                                        (base + "_n").c_str(),
+                                                        &vid) == NC_ENOTVAR &&
+                                           nc_inq_varid(
+                                               ncid, (base + "_value").c_str(),
+                                               &vid) == NC_ENOTVAR;
+                                }
+                                size_t count = 0;
+                                return get_dim(("n_" + base).c_str(), dim,
+                                               count) &&
+                                       count <=
+                                           io_detail::MAX_INPUT_PARAMS_VECTOR &&
+                                       read_vector_int((base + "_m").c_str(),
+                                                       dim, count, m) &&
+                                       read_vector_int((base + "_n").c_str(),
+                                                       dim, count, n) &&
+                                       read_vector_double(
+                                           (base + "_value").c_str(), dim,
+                                           count, values);
                             };
-                            if (!read_optional("n_am", "am", ip.am) ||
-                                !read_optional("n_ac", "ac", ip.ac) ||
-                                !read_optional("n_ai", "ai", ip.ai) ||
-                                !read_optional("n_aphi", "aphi", ip.aphi) ||
-                                !read_optional("n_raxis", "raxis_c",
-                                               ip.raxis_c) ||
-                                !read_optional("n_zaxis", "zaxis_s",
-                                               ip.zaxis_s) ||
-                                !read_optional("n_extcur", "extcur",
-                                               ip.extcur)) {
-                                return fail("malformed embedded input record");
+                            if (!read_vector_double("raxis_s", dim_ntorp1,
+                                                    ntorp1, ip.raxis_s) ||
+                                !read_vector_double("zaxis_c", dim_ntorp1,
+                                                    ntorp1, ip.zaxis_c) ||
+                                !read_harmonics("rbs", ip.rbs_m, ip.rbs_n,
+                                                ip.rbs_value) ||
+                                !read_harmonics("zbc", ip.zbc_m, ip.zbc_n,
+                                                ip.zbc_value) ||
+                                !read_matrix_double("rbsc", dim_mpol,
+                                                    dim_ntorp1, mpol, ntorp1,
+                                                    ip.rbsc) ||
+                                !read_matrix_double("rbcs", dim_mpol,
+                                                    dim_ntorp1, mpol, ntorp1,
+                                                    ip.rbcs) ||
+                                !read_matrix_double("zbcc", dim_mpol,
+                                                    dim_ntorp1, mpol, ntorp1,
+                                                    ip.zbcc) ||
+                                !read_matrix_double("zbss", dim_mpol,
+                                                    dim_ntorp1, mpol, ntorp1,
+                                                    ip.zbss)) {
+                                return fail(
+                                    "malformed asymmetric input record");
                             }
                         }
-                        // The input stage arrays are optional as a whole (the
-                        // writer omits them for an empty stage list).
-                        {
-                            int vid = -1;
-                            if (nc_inq_varid(ncid, "stage_in_ns", &vid) ==
-                                NC_NOERR) {
-                                int dim_nstages_in = -1;
-                                size_t nstages_in = 0;
-                                if (!get_dim("nstages_in", dim_nstages_in,
-                                             nstages_in)) {
-                                    return fail(
-                                        "malformed embedded input record");
-                                }
-                                if (nstages_in >
-                                    equilibrium::io_detail::MAX_STAGE_COUNT) {
-                                    return fail(
-                                        "embedded input stage count "
-                                        "exceeds the resource cap");
-                                }
-                                std::vector<int> stg_in_ns(nstages_in),
-                                    stg_max_iter(nstages_in);
-                                std::vector<double> stg_ftol(nstages_in);
-                                if (!read_vector_int("stage_in_ns",
-                                                     dim_nstages_in, nstages_in,
-                                                     stg_in_ns) ||
-                                    !read_vector_int("stage_max_iter",
-                                                     dim_nstages_in, nstages_in,
-                                                     stg_max_iter) ||
-                                    !read_vector_double("stage_ftol",
-                                                        dim_nstages_in,
-                                                        nstages_in, stg_ftol)) {
-                                    return fail(
-                                        "malformed embedded input record");
-                                }
-                                for (size_t g = 0; g < nstages_in; ++g) {
-                                    InputStage st;
-                                    st.ns = stg_in_ns[g];
-                                    st.max_iter = stg_max_iter[g];
-                                    st.ftol = stg_ftol[g];
-                                    ip.stages.push_back(st);
-                                }
-                            }
-                        }
-                        // Boundary + folded (always part of a present record).
-                        int dim_nrbc = -1, dim_nzbs = -1, dim_mpol = -1,
-                            dim_ntorp1 = -1;
-                        size_t nrbc = 0, nzbs = 0, mpol = 0, ntorp1 = 0;
-                        if (!get_dim("nrbc", dim_nrbc, nrbc) ||
-                            !get_dim("nzbs", dim_nzbs, nzbs) ||
-                            !get_dim("n_mpol", dim_mpol, mpol) ||
-                            !get_dim("n_ntorp1", dim_ntorp1, ntorp1)) {
-                            return fail("malformed embedded input record");
-                        }
-                        if (!read_vector_int("rbc_m", dim_nrbc, nrbc,
-                                             ip.rbc_m) ||
-                            !read_vector_int("rbc_n", dim_nrbc, nrbc,
-                                             ip.rbc_n) ||
-                            !read_vector_double("rbc_value", dim_nrbc, nrbc,
-                                                ip.rbc_value) ||
-                            !read_vector_int("zbs_m", dim_nzbs, nzbs,
-                                             ip.zbs_m) ||
-                            !read_vector_int("zbs_n", dim_nzbs, nzbs,
-                                             ip.zbs_n) ||
-                            !read_vector_double("zbs_value", dim_nzbs, nzbs,
-                                                ip.zbs_value) ||
-                            !read_matrix_double("rbcc", dim_mpol, dim_ntorp1,
-                                                mpol, ntorp1, ip.rbcc) ||
-                            !read_matrix_double("rbss", dim_mpol, dim_ntorp1,
-                                                mpol, ntorp1, ip.rbss) ||
-                            !read_matrix_double("zbsc", dim_mpol, dim_ntorp1,
-                                                mpol, ntorp1, ip.zbsc) ||
-                            !read_matrix_double("zbcs", dim_mpol, dim_ntorp1,
-                                                mpol, ntorp1, ip.zbcs)) {
-                            return fail("malformed embedded input record");
-                        }
-                        // The schema tag is informational; an absent or
-                        // unreadable one keeps the default.
-                        // The schema/profile-type tags are informational; an
-                        // absent one keeps the default (an older container
-                        // lacks the profile types -> "power_series").
-                        std::string schema_tag;
-                        if (get_str("schema", schema_tag))
-                            ip.schema = schema_tag;
-                        std::string pmass_tag, piota_tag, pcurr_tag;
-                        if (get_str("pmass_type", pmass_tag))
-                            ip.pmass_type = pmass_tag;
-                        if (get_str("piota_type", piota_tag))
-                            ip.piota_type = piota_tag;
-                        if (get_str("pcurr_type", pcurr_tag))
-                            ip.pcurr_type = pcurr_tag;
-                        std::string pflux_tag;
-                        if (get_str("pflux_type", pflux_tag))
-                            ip.pflux_type = pflux_tag;
-                        parsed_report.input_params = std::move(ip);
-                    }
-                }
-                if (snapshot.lasym()) {
-                    auto& ip = parsed_report.input_params;
-                    int lasym = 0;
-                    if (!read_scalar_int("lasym", lasym) || lasym != 1 ||
-                        ip.mpol < 1 || ip.ntor < 0) {
-                        return fail("missing typed asymmetric input record");
-                    }
-                    ip.lasym = true;
-                    int dim_mpol = -1, dim_ntorp1 = -1;
-                    size_t mpol = 0, ntorp1 = 0;
-                    if (!get_dim("n_mpol", dim_mpol, mpol) ||
-                        !get_dim("n_ntorp1", dim_ntorp1, ntorp1) ||
-                        mpol != (size_t)ip.mpol ||
-                        ntorp1 != (size_t)ip.ntor + 1) {
-                        return fail("malformed asymmetric input dimensions");
-                    }
-                    const auto modes = checked_mul(mpol, ntorp1);
-                    if (!modes || *modes > io_detail::MAX_INPUT_PARAMS_VECTOR) {
-                        return fail(
-                            "asymmetric input dimensions exceed resource cap");
-                    }
-                    auto read_harmonics = [&](const char* name,
-                                              std::vector<int>& m,
-                                              std::vector<int>& n,
-                                              std::vector<double>& values) {
-                        const std::string base(name);
-                        int dim = -1;
-                        if (nc_inq_dimid(ncid, ("n_" + base).c_str(), &dim) ==
-                            NC_EBADDIM) {
-                            int vid = -1;
-                            return nc_inq_varid(ncid, (base + "_m").c_str(),
-                                                &vid) == NC_ENOTVAR &&
-                                   nc_inq_varid(ncid, (base + "_n").c_str(),
-                                                &vid) == NC_ENOTVAR &&
-                                   nc_inq_varid(ncid, (base + "_value").c_str(),
-                                                &vid) == NC_ENOTVAR;
-                        }
-                        size_t count = 0;
-                        return get_dim(("n_" + base).c_str(), dim, count) &&
-                               count <= io_detail::MAX_INPUT_PARAMS_VECTOR &&
-                               read_vector_int((base + "_m").c_str(), dim,
-                                               count, m) &&
-                               read_vector_int((base + "_n").c_str(), dim,
-                                               count, n) &&
-                               read_vector_double((base + "_value").c_str(),
-                                                  dim, count, values);
-                    };
-                    if (!read_vector_double("raxis_s", dim_ntorp1, ntorp1,
-                                            ip.raxis_s) ||
-                        !read_vector_double("zaxis_c", dim_ntorp1, ntorp1,
-                                            ip.zaxis_c) ||
-                        !read_harmonics("rbs", ip.rbs_m, ip.rbs_n,
-                                        ip.rbs_value) ||
-                        !read_harmonics("zbc", ip.zbc_m, ip.zbc_n,
-                                        ip.zbc_value) ||
-                        !read_matrix_double("rbsc", dim_mpol, dim_ntorp1, mpol,
-                                            ntorp1, ip.rbsc) ||
-                        !read_matrix_double("rbcs", dim_mpol, dim_ntorp1, mpol,
-                                            ntorp1, ip.rbcs) ||
-                        !read_matrix_double("zbcc", dim_mpol, dim_ntorp1, mpol,
-                                            ntorp1, ip.zbcc) ||
-                        !read_matrix_double("zbss", dim_mpol, dim_ntorp1, mpol,
-                                            ntorp1, ip.zbss)) {
-                        return fail("malformed asymmetric input record");
-                    }
-                }
+
+                        return {};
+                    });
                 report->get() = std::move(parsed_report);
             }
             nc_close(ncid);
@@ -1529,6 +1749,10 @@ class NetcdfV1Reader final : public Reader {
             return Result<EquilibriumSnapshot>(
                 "NetCDF: allocation failed (dimensions implausible or "
                 "corrupt)");
+        } catch (const std::runtime_error& error) {
+            nc_close(ncid);
+            return Result<EquilibriumSnapshot>("NetCDF: " +
+                                               std::string(error.what()));
         }
     }
 };

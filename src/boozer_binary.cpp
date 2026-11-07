@@ -2,6 +2,7 @@
 
 #include "boozer_output_internal.hpp"
 #include "equilibrium/writer_helpers.hpp"
+#include "read_selection.hpp"
 
 #include <array>
 #include <bit>
@@ -15,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace equilibrium {
@@ -97,6 +99,11 @@ class Writer {
     std::unique_ptr<std::FILE, decltype(&std::fclose)> output_;
 };
 
+class FramingError : public std::runtime_error {
+   public:
+    using std::runtime_error::runtime_error;
+};
+
 class Reader {
    public:
     explicit Reader(const std::filesystem::path& path)
@@ -108,7 +115,7 @@ class Reader {
         require_extent(count, 1);
         input_.read(static_cast<char*>(data),
                     static_cast<std::streamsize>(count));
-        if (!input_) throw std::runtime_error("truncated Boozer input");
+        if (!input_) throw FramingError("truncated Boozer input");
         remaining_ -= count;
     }
     template <typename UInt>
@@ -129,19 +136,36 @@ class Reader {
     std::string string() {
         const auto count = i32();
         if (count < 0 || count > (1 << 24)) {
-            throw std::runtime_error("invalid Boozer string length");
+            throw FramingError("invalid Boozer string length");
         }
         std::string value(static_cast<std::size_t>(count), '\0');
         bytes(value.data(), value.size());
         return value;
     }
-    std::vector<double> doubles(std::size_t count) {
+    void skip(std::size_t count, std::size_t width = 1) {
+        require_extent(count, width);
+        const auto bytes = count * width;
+        if (!std::in_range<std::streamoff>(bytes))
+            throw FramingError("Boozer extent exceeds stream range");
+        input_.seekg(static_cast<std::streamoff>(bytes), std::ios::cur);
+        if (!input_) throw FramingError("cannot skip Boozer payload");
+        remaining_ -= bytes;
+    }
+    std::vector<double> doubles(std::size_t count, bool load = true) {
+        if (!load) {
+            skip(count, sizeof(double));
+            return {};
+        }
         require_extent(count, sizeof(double));
         std::vector<double> values(count);
         for (double& value : values) value = f64();
         return values;
     }
-    std::vector<int> integers(std::size_t count) {
+    std::vector<int> integers(std::size_t count, bool load = true) {
+        if (!load) {
+            skip(count, sizeof(std::int32_t));
+            return {};
+        }
         require_extent(count, sizeof(std::int32_t));
         std::vector<int> values(count);
         for (int& value : values) value = i32();
@@ -151,7 +175,7 @@ class Reader {
    private:
     void require_extent(std::size_t count, std::size_t width) const {
         if (count > remaining_ / width)
-            throw std::runtime_error("truncated Boozer input");
+            throw FramingError("truncated Boozer input");
     }
     std::ifstream input_;
     std::uintmax_t remaining_ = 0;
@@ -195,8 +219,8 @@ void write_boozer_binary(const std::filesystem::path& path,
     writer.i32(result.grid.first_surface);
     writer.i32(result.grid.ntheta);
     writer.i32(result.grid.nzeta);
-    writer.i32(result.spectrum.mmax);
-    writer.i32(result.spectrum.nmax);
+    writer.i32(spectrum.mmax);
+    writer.i32(spectrum.nmax);
     writer.i32(static_cast<std::int32_t>(result.radial_order));
     if (result.tracing) writer.i32(result.lasym ? 1 : 0);
     writer.f64(result.resonance_tolerance);
@@ -254,7 +278,11 @@ void write_boozer_binary(const std::filesystem::path& path,
     writer.publish();
 }
 
-BoozerFile read_boozer_binary(const std::filesystem::path& path) {
+namespace {
+BoozerFile read_selected(const std::filesystem::path& path,
+                         const BoozerReadOptions& options,
+                         bool strict) {
+    io_detail::ReadSelection selection(options.groups, strict);
     Reader reader(path);
     std::array<char, 8> magic{};
     reader.bytes(magic.data(), magic.size());
@@ -297,10 +325,7 @@ BoozerFile read_boozer_binary(const std::filesystem::path& path) {
         lasym = flag == 1;
     }
     result.lasym = lasym;
-    if (fourier_convention !=
-        (lasym ? boozer_detail::ASYMMETRIC_FOURIER_CONVENTION
-               : boozer_detail::FOURIER_CONVENTION))
-        throw std::runtime_error("unsupported Boozer Fourier convention");
+
     result.resonance_tolerance = reader.f64();
     result.grid.source_ns = result.source_ns;
     if (result.source_ns < 2 || result.source_ns > (1 << 20) ||
@@ -327,84 +352,229 @@ BoozerFile read_boozer_binary(const std::filesystem::path& path) {
         checked_product(static_cast<std::size_t>(surfaces), mode_count);
     result.s = reader.doubles(static_cast<std::size_t>(surfaces));
     result.iota = reader.doubles(static_cast<std::size_t>(surfaces));
-    boozer_detail::RealBoozerSpectrum spectrum;
-    spectrum.lasym = lasym;
-    spectrum.mmax = result.spectrum.mmax;
-    spectrum.nmax = result.spectrum.nmax;
-    spectrum.m = reader.integers(mode_count);
-    spectrum.n = reader.integers(mode_count);
-    spectrum.rmncc = reader.doubles(coefficient_count);
-    spectrum.rmnss = reader.doubles(coefficient_count);
-    spectrum.zmnsc = reader.doubles(coefficient_count);
-    spectrum.zmncs = reader.doubles(coefficient_count);
-    spectrum.numnsc = reader.doubles(coefficient_count);
-    spectrum.numncs = reader.doubles(coefficient_count);
-    if (lasym) {
-        spectrum.rmnsc = reader.doubles(coefficient_count);
-        spectrum.rmncs = reader.doubles(coefficient_count);
-        spectrum.zmncc = reader.doubles(coefficient_count);
-        spectrum.zmnss = reader.doubles(coefficient_count);
-        spectrum.numncc = reader.doubles(coefficient_count);
-        spectrum.numnss = reader.doubles(coefficient_count);
-    }
-    result.spectrum = boozer_detail::restore_complex_spectrum(
-        spectrum, result.source_ns, result.grid.first_surface);
-    result.grid.b = reader.doubles(real_count);
-    result.grid.sqrtg_b = reader.doubles(real_count);
-    result.grid.b2j00 = reader.doubles(static_cast<std::size_t>(surfaces));
-    if (has_tracing) {
-        if (reader.string() != boozer_detail::TRACING_CONVENTION)
-            throw std::runtime_error("unsupported Boozer tracing convention");
-        const int aphi_count = reader.i32();
-        const int width = static_cast<int>(result.radial_order);
-        if (aphi_count < 1 || aphi_count > (1 << 20) ||
-            (width != 2 && width != 4) || result.source_ns <= width ||
-            result.source_ntor < 0 || result.source_ntor > (1 << 15) ||
-            result.source_ntheta < 1 || result.source_nzeta < 1)
-            throw std::runtime_error("invalid Boozer tracing dimensions");
-        auto& tracing = result.tracing.emplace();
-        tracing.phiedge = reader.f64();
-        tracing.aphi = reader.doubles(static_cast<std::size_t>(aphi_count));
-        tracing.toroidal_flux_derivative =
-            reader.doubles(static_cast<std::size_t>(result.source_ns));
-        tracing.poloidal_flux_derivative =
-            reader.doubles(static_cast<std::size_t>(result.source_ns));
-        const auto axis_modes =
-            static_cast<std::size_t>(result.source_ntor) + 1;
-        tracing.axis_r_cos = reader.doubles(axis_modes);
-        tracing.axis_r_sin = reader.doubles(axis_modes);
-        tracing.axis_z_cos = reader.doubles(axis_modes);
-        tracing.axis_z_sin = reader.doubles(axis_modes);
-        tracing.axis_half_s = reader.doubles(static_cast<std::size_t>(width));
-        const auto half_count = checked_product(
-            static_cast<std::size_t>(width),
-            checked_product(static_cast<std::size_t>(result.source_ntheta),
-                            static_cast<std::size_t>(result.source_nzeta)));
-        for (auto& field : tracing.axis_half_fields)
-            field = reader.doubles(half_count);
-        if (has_magnetic) {
-            if (reader.string() != boozer_detail::MAGNETIC_CONVENTION)
-                throw std::runtime_error(
-                    "unsupported Boozer magnetic convention");
-            auto& magnetic = tracing.magnetic.emplace();
-            for (auto& field : magnetic.fields)
-                field = reader.doubles(real_count);
-            result.grid.source_theta_shift = reader.doubles(real_count);
-            result.grid.nu = reader.doubles(real_count);
+
+    // Coordinates are shared by all groups and remain mandatory.
+    boozer_detail::validate_group(result, DataGroup::COUNT);
+    std::string blocked;
+    auto process = [&](DataGroup group, bool present, auto decode, auto drop,
+                       bool validate = true) {
+        std::string reason;
+        if (present) {
+            if (!blocked.empty())
+                reason = blocked;
+            else {
+                try {
+                    reason = decode();
+                } catch (const FramingError& error) {
+                    if (strict) throw;
+                    reason = blocked = error.what();
+                }
+                if (reason.empty() && validate && selection.wants(group)) {
+                    try {
+                        boozer_detail::validate_group(result, group);
+                    } catch (const std::exception& error) {
+                        reason = error.what();
+                    }
+                }
+            }
+        }
+        if (!selection.accept(group, present, reason)) drop();
+    };
+    const auto finish = [&]() {
+        if (result.tracing && result.independent_magnetic) {
+            result.tracing->magnetic = std::move(result.independent_magnetic);
+            result.independent_magnetic.reset();
+        }
+        selection.finish();
+        if (strict) validate_boozer_result(result);
+        result.read_diagnostics = std::move(selection.diagnostics);
+        return std::move(file);
+    };
+    process(
+        DataGroup::GEOMETRY, true,
+        [&]() -> std::string {
+            const bool load = selection.wants(DataGroup::GEOMETRY);
+            RealBoozerSpectrum spectrum;
+            spectrum.lasym = lasym;
+            spectrum.mmax = result.spectrum.mmax;
+            spectrum.nmax = result.spectrum.nmax;
+            spectrum.m = reader.integers(mode_count, load);
+            spectrum.n = reader.integers(mode_count, load);
+            for (auto* family :
+                 {&spectrum.rmncc, &spectrum.rmnss, &spectrum.zmnsc,
+                  &spectrum.zmncs, &spectrum.numnsc, &spectrum.numncs})
+                *family = reader.doubles(coefficient_count, load);
+            if (lasym)
+                for (auto* family :
+                     {&spectrum.rmnsc, &spectrum.rmncs, &spectrum.zmncc,
+                      &spectrum.zmnss, &spectrum.numncc, &spectrum.numnss})
+                    *family = reader.doubles(coefficient_count, load);
+            if (!load) return {};
+            if (fourier_convention !=
+                (lasym ? boozer_detail::ASYMMETRIC_FOURIER_CONVENTION
+                       : boozer_detail::FOURIER_CONVENTION))
+                return "unsupported Boozer Fourier convention";
+            try {
+                boozer_detail::validate_real_spectrum(spectrum, surfaces);
+                if (options.spectrum != SpectrumStorage::REAL)
+                    result.spectrum = boozer_detail::restore_complex_spectrum(
+                        spectrum, result.source_ns, result.grid.first_surface);
+                if (options.spectrum != SpectrumStorage::COMPLEX)
+                    result.real_spectrum = std::move(spectrum);
+            } catch (const std::exception& error) { return error.what(); }
+            return {};
+        },
+        [&] {
+            result.real_spectrum.reset();
+            result.spectrum = {};
+        });
+    if (!selection.wants(DataGroup::STRENGTH) &&
+        !selection.wants(DataGroup::TRACING) &&
+        !selection.wants(DataGroup::MAGNETIC) &&
+        !selection.wants(DataGroup::PROFILES))
+        return finish();
+    process(
+        DataGroup::STRENGTH, true,
+        [&]() -> std::string {
+            const bool load = selection.wants(DataGroup::STRENGTH);
+            result.grid.b = reader.doubles(real_count, load);
+            result.grid.sqrtg_b = reader.doubles(real_count, load);
+            result.grid.b2j00 = reader.doubles(surfaces, load);
+            return {};
+        },
+        [&] {
+            result.grid.b.clear();
+            result.grid.sqrtg_b.clear();
+            result.grid.b2j00.clear();
+        });
+    if (!selection.wants(DataGroup::TRACING) &&
+        !selection.wants(DataGroup::MAGNETIC) &&
+        !selection.wants(DataGroup::PROFILES))
+        return finish();
+
+    // The flux profile kind follows profiles in newer files. Delay tracing
+    // validation until that field is decoded; optional profiles are
+    // independent.
+    std::string tracing_error;
+    if (has_tracing && blocked.empty()) {
+        try {
+            const bool load = selection.wants(DataGroup::TRACING);
+            const auto convention = reader.string();
+            const int aphi_count = reader.i32();
+            const int width = static_cast<int>(result.radial_order);
+            if (aphi_count < 1 || aphi_count > (1 << 20) ||
+                (width != 2 && width != 4) || result.source_ns <= width ||
+                result.source_ntor < 0 || result.source_ntor > (1 << 15) ||
+                result.source_ntheta < 1 || result.source_nzeta < 1)
+                throw FramingError("invalid Boozer tracing dimensions");
+            BoozerTracingData tracing;
+            tracing.phiedge = reader.f64();
+            tracing.aphi = reader.doubles(aphi_count, load);
+            tracing.toroidal_flux_derivative =
+                reader.doubles(result.source_ns, load);
+            tracing.poloidal_flux_derivative =
+                reader.doubles(result.source_ns, load);
+            const auto axis_modes =
+                static_cast<std::size_t>(result.source_ntor) + 1;
+            tracing.axis_r_cos = reader.doubles(axis_modes, load);
+            tracing.axis_r_sin = reader.doubles(axis_modes, load);
+            tracing.axis_z_cos = reader.doubles(axis_modes, load);
+            tracing.axis_z_sin = reader.doubles(axis_modes, load);
+            tracing.axis_half_s = reader.doubles(width, load);
+            const auto half_count = checked_product(
+                width,
+                checked_product(result.source_ntheta, result.source_nzeta));
+            for (auto& field : tracing.axis_half_fields)
+                field = reader.doubles(half_count, load);
+            if (load) {
+                result.tracing = std::move(tracing);
+                if (convention != boozer_detail::TRACING_CONVENTION)
+                    tracing_error = "unsupported Boozer tracing convention";
+            }
+        } catch (const FramingError& error) {
+            if (strict) throw;
+            blocked = error.what();
         }
     }
-    if (has_profiles) {
-        if (reader.string() != boozer_detail::PROFILE_CONVENTION)
-            throw std::runtime_error(
-                "unsupported Boozer surface profile convention");
-        auto& profiles = result.profiles.emplace();
-        profiles.pressure = reader.doubles(static_cast<std::size_t>(surfaces));
-        profiles.current_i = reader.doubles(static_cast<std::size_t>(surfaces));
-        profiles.current_g = reader.doubles(static_cast<std::size_t>(surfaces));
+    if (!blocked.empty()) tracing_error = blocked;
+    if (selection.wants(DataGroup::MAGNETIC) ||
+        selection.wants(DataGroup::PROFILES) ||
+        (has_flux_type && selection.wants(DataGroup::TRACING))) {
+        process(
+            DataGroup::MAGNETIC, has_magnetic,
+            [&]() -> std::string {
+                const bool load = selection.wants(DataGroup::MAGNETIC);
+                const auto convention = reader.string();
+                BoozerMagneticData magnetic;
+                for (auto& field : magnetic.fields)
+                    field = reader.doubles(real_count, load);
+                result.grid.source_theta_shift =
+                    reader.doubles(real_count, load);
+                result.grid.nu = reader.doubles(real_count, load);
+                if (load) {
+                    result.independent_magnetic = std::move(magnetic);
+                    if (convention != boozer_detail::MAGNETIC_CONVENTION)
+                        return "unsupported Boozer magnetic convention";
+                }
+                return {};
+            },
+            [&] {
+                result.independent_magnetic.reset();
+                result.grid.source_theta_shift.clear();
+                result.grid.nu.clear();
+            });
     }
-    if (has_flux_type) result.tracing->pflux_type = reader.string();
-    validate_boozer_result(result);
-    return file;
+    if (selection.wants(DataGroup::PROFILES) ||
+        (has_flux_type && selection.wants(DataGroup::TRACING))) {
+        process(
+            DataGroup::PROFILES, has_profiles,
+            [&]() -> std::string {
+                const bool load = selection.wants(DataGroup::PROFILES);
+                const auto convention = reader.string();
+                BoozerSurfaceProfiles profiles;
+                profiles.pressure = reader.doubles(surfaces, load);
+                profiles.current_i = reader.doubles(surfaces, load);
+                profiles.current_g = reader.doubles(surfaces, load);
+                if (load) {
+                    result.profiles = std::move(profiles);
+                    if (convention != boozer_detail::PROFILE_CONVENTION)
+                        return "unsupported Boozer surface profile convention";
+                }
+                return {};
+            },
+            [&] { result.profiles.reset(); });
+    }
+    if (has_flux_type && selection.wants(DataGroup::TRACING)) {
+        if (!blocked.empty())
+            tracing_error = blocked;
+        else {
+            try {
+                const auto type = reader.string();
+                if (result.tracing) result.tracing->pflux_type = type;
+            } catch (const FramingError& error) {
+                if (strict) throw;
+                tracing_error = error.what();
+            }
+        }
+    }
+    if (result.tracing && tracing_error.empty()) {
+        try {
+            boozer_detail::validate_group(result, DataGroup::TRACING);
+        } catch (const std::exception& error) { tracing_error = error.what(); }
+    }
+    if (!selection.accept(DataGroup::TRACING, has_tracing, tracing_error))
+        result.tracing.reset();
+    return finish();
+}
+}  // namespace
+
+BoozerFile read_boozer_binary(const std::filesystem::path& path) {
+    return read_selected(path, BoozerReadOptions{}, true);
+}
+
+BoozerFile read_boozer_binary(const std::filesystem::path& path,
+                              const BoozerReadOptions& options) {
+    return read_selected(path, options, false);
 }
 
 }  // namespace equilibrium

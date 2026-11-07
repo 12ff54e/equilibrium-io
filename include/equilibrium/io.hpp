@@ -12,6 +12,10 @@ Result<Equilibrium> read(const std::string& path,
 Result<Equilibrium> read(const std::string& path,
                          OutputFormat format,
                          ReadMode mode = ReadMode::COMPLETE);
+Result<Equilibrium> read(const std::string& path, const ReadRequest& request);
+Result<Equilibrium> read(const std::string& path,
+                         OutputFormat format,
+                         const ReadRequest& request);
 Status write(const std::string& path,
              const EquilibriumView& view,
              WriteOptions options = {});

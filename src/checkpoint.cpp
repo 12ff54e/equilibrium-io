@@ -21,6 +21,7 @@
 #include "equilibrium/checkpoint.hpp"
 
 #include "io_common.hpp"
+#include "read_selection.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -31,7 +32,6 @@ namespace {
 
 constexpr char CHECKPOINT_MAGIC[9] = "CUMECKP1";
 constexpr std::int32_t CHECKPOINT_VERSION = 9;
-constexpr std::int32_t MIN_CHECKPOINT_VERSION = 1;
 
 }  // namespace
 
@@ -79,84 +79,16 @@ Status write_checkpoint(const SnapshotView& snapshot,
 Result<EquilibriumSnapshot> read_checkpoint(
     const std::string& path,
     std::optional<std::reference_wrapper<InputParams>> input_params) {
-    FILE* fp = fopen(path.c_str(), "rb");
-    if (!fp) return Result<EquilibriumSnapshot>("cannot open " + path);
-
-    auto fail = [&](const std::string& reason) -> Result<EquilibriumSnapshot> {
-        fclose(fp);
-        return Result<EquilibriumSnapshot>(reason);
-    };
-
-    char magic[9] = {0};
-    std::int32_t version = 0, precision = 0, ns = 0, mnmax = 0;
-    if (!io_detail::read_bytes(fp, magic, 8) ||
-        !io_detail::read_i32(fp, version) ||
-        !io_detail::read_i32(fp, precision) || !io_detail::read_i32(fp, ns) ||
-        !io_detail::read_i32(fp, mnmax)) {
-        return fail("checkpoint: truncated header");
-    }
-    if (std::memcmp(magic, CHECKPOINT_MAGIC, 8) != 0) {
-        return fail("checkpoint: bad magic (not a cumes checkpoint)");
-    }
-    if (version < MIN_CHECKPOINT_VERSION || version > CHECKPOINT_VERSION) {
-        return fail("checkpoint: unsupported version " +
-                    std::to_string(version));
-    }
-    if (precision != 0) {
-        return fail("checkpoint: unsupported precision tag " +
-                    std::to_string(precision));
-    }
-    std::int32_t components = 6;
-    if (version >= 7 && !io_detail::read_i32(fp, components))
-        return fail("truncated spectral component count");
-    std::size_t n = 0;
-    std::string reason;
-    if (!io_detail::check_state_dimensions(fp, ns, mnmax, n, reason,
-                                           components)) {
-        return fail("checkpoint: " + reason);
-    }
-    EquilibriumSnapshot snapshot;
-    snapshot.source_version = version;
-    snapshot.source_checkpoint = true;
-    snapshot.ns = ns;
-    snapshot.mnmax = mnmax;
-    snapshot.families.resize(components);
-    if (!io_detail::read_state_families(fp, n, snapshot)) {
-        return fail("checkpoint: truncated state data");
-    }
-    // The version-2 input record rides after the families; the state read
-    // above is the whole restart contract, and a reader that does not ask
-    // for the record never touches it. The three profile-type strings exist
-    // in version-3 checkpoints only.
-    InputParams parsed_input;
-    if (input_params && version >= 2) {
-        if (version == 7) {
-            return fail(
-                "checkpoint: JSON-based asymmetric input record is "
-                "no longer supported");
-        }
-        const bool has_profile_types = version == 3 || version >= 6;
-        const int free_boundary_extension = version >= 6   ? 3
-                                            : version >= 4 ? version - 2
-                                                           : 0;
-        if (!io_detail::read_input_params(
-                fp, parsed_input, reason, has_profile_types,
-                free_boundary_extension,
-                version == 8 || (version >= 9 && snapshot.lasym()),
-                version >= 9)) {
-            return fail("checkpoint: " + reason);
-        }
-        if (parsed_input.lasym != snapshot.lasym()) {
-            return fail("checkpoint: state/input symmetry mismatch");
-        }
-    }
-    if (input_params) {
-        if (version >= 2 && (fgetc(fp) != EOF || ferror(fp)))
-            return fail("checkpoint: trailing data or read error");
-        input_params->get() = std::move(parsed_input);
-    }
-    fclose(fp);
-    return snapshot;
+    auto decoded = io_detail::read_native_binary(
+        path, io_detail::legacy_request(input_params.has_value()), true);
+    if (!decoded) return Result<EquilibriumSnapshot>(decoded.error());
+    auto& owner = decoded.value();
+    if (!owner.source.checkpoint)
+        return Result<EquilibriumSnapshot>("expected a checkpoint");
+    if (input_params)
+        input_params->get() =
+            owner.input ? std::move(*owner.input) : InputParams{};
+    return io_detail::take_snapshot(std::move(owner));
 }
 
 }  // namespace equilibrium

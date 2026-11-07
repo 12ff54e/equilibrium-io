@@ -11,6 +11,8 @@
 #include "equilibrium/input_params.hpp"
 #include "equilibrium/writer_helpers.hpp"
 
+#include <array>
+#include <bit>
 #include <climits>
 #include <cstdint>
 #include <cstdio>
@@ -75,15 +77,32 @@ inline bool check_state_dimensions(FILE* fp,
     return true;
 }
 
-// ---- little-endian binary field I/O (native on the supported x86 host) ----
+// Little-endian scalars; the array fast path is valid only on little-endian
+// hosts. Byte order never crosses the public physical-data interface.
+template <class UInt>
+inline bool write_le(FILE* fp, UInt value) {
+    std::array<unsigned char, sizeof(UInt)> bytes{};
+    for (std::size_t i = 0; i < bytes.size(); ++i)
+        bytes[i] = static_cast<unsigned char>(value >> (8 * i));
+    return fwrite(bytes.data(), 1, bytes.size(), fp) == bytes.size();
+}
+template <class UInt>
+inline bool read_le(FILE* fp, UInt& value) {
+    std::array<unsigned char, sizeof(UInt)> bytes{};
+    if (fread(bytes.data(), 1, bytes.size(), fp) != bytes.size()) return false;
+    value = 0;
+    for (std::size_t i = 0; i < bytes.size(); ++i)
+        value |= static_cast<UInt>(bytes[i]) << (8 * i);
+    return true;
+}
 inline bool write_u8(FILE* fp, std::uint8_t v) {
     return fwrite(&v, sizeof(v), 1, fp) == 1;
 }
 inline bool write_i32(FILE* fp, std::int32_t v) {
-    return fwrite(&v, sizeof(v), 1, fp) == 1;
+    return write_le(fp, std::bit_cast<std::uint32_t>(v));
 }
 inline bool write_f64(FILE* fp, double v) {
-    return fwrite(&v, sizeof(v), 1, fp) == 1;
+    return write_le(fp, std::bit_cast<std::uint64_t>(v));
 }
 inline bool write_bytes(FILE* fp, const void* p, std::size_t n) {
     return n == 0 || fwrite(p, 1, n, fp) == n;
@@ -94,20 +113,43 @@ inline bool write_string(FILE* fp, const std::string& s) {
            write_bytes(fp, s.data(), s.size());
 }
 inline bool write_f64_array(FILE* fp, std::span<const double> p) {
-    return write_bytes(fp, p.data(), p.size() * sizeof(double));
+    if constexpr (std::endian::native == std::endian::little)
+        return write_bytes(fp, p.data(), p.size() * sizeof(double));
+    for (double value : p)
+        if (!write_f64(fp, value)) return false;
+    return true;
 }
 
 inline bool read_u8(FILE* fp, std::uint8_t& v) {
     return fread(&v, sizeof(v), 1, fp) == 1;
 }
 inline bool read_i32(FILE* fp, std::int32_t& v) {
-    return fread(&v, sizeof(v), 1, fp) == 1;
+    std::uint32_t bits;
+    if (!read_le(fp, bits)) return false;
+    v = std::bit_cast<std::int32_t>(bits);
+    return true;
 }
 inline bool read_f64(FILE* fp, double& v) {
-    return fread(&v, sizeof(v), 1, fp) == 1;
+    std::uint64_t bits;
+    if (!read_le(fp, bits)) return false;
+    v = std::bit_cast<double>(bits);
+    return true;
 }
 inline bool read_bytes(FILE* fp, void* p, std::size_t n) {
     return n == 0 || fread(p, 1, n, fp) == n;
+}
+inline bool skip_bytes(FILE* fp, std::size_t count) {
+    const auto size = file_size(fp);
+    const auto position = ftell(fp);
+    return size && position >= 0 && *size >= position &&
+           count <= static_cast<unsigned long long>(*size - position) &&
+           count <= LONG_MAX &&
+           fseek(fp, static_cast<long>(count), SEEK_CUR) == 0;
+}
+inline bool skip_string(FILE* fp) {
+    std::int32_t count = 0;
+    return read_i32(fp, count) && count >= 0 && count <= (1 << 24) &&
+           skip_bytes(fp, static_cast<std::size_t>(count));
 }
 inline bool read_string(FILE* fp, std::string& s) {
     std::int32_t n = 0;
@@ -117,7 +159,11 @@ inline bool read_string(FILE* fp, std::string& s) {
     return read_bytes(fp, s.data(), static_cast<std::size_t>(n));
 }
 inline bool read_f64_array(FILE* fp, std::span<double> p) {
-    return read_bytes(fp, p.data(), p.size() * sizeof(double));
+    if constexpr (std::endian::native == std::endian::little)
+        return read_bytes(fp, p.data(), p.size() * sizeof(double));
+    for (double& value : p)
+        if (!read_f64(fp, value)) return false;
+    return true;
 }
 
 // ---- shared magic-prefixed state payload (checkpoint.cpp,
@@ -171,7 +217,8 @@ inline bool write_derived_fields(FILE* fp, const SnapshotView& snapshot) {
 
 inline bool read_derived_fields(FILE* fp,
                                 EquilibriumSnapshot& snapshot,
-                                std::string& reason) {
+                                std::string& reason,
+                                bool load = true) {
     std::int32_t ntheta = 0, nzeta = 0;
     if (!read_i32(fp, ntheta) || !read_i32(fp, nzeta)) {
         reason = "truncated derived-field dimensions";
@@ -212,6 +259,7 @@ inline bool read_derived_fields(FILE* fp,
         return false;
     }
 
+    if (!load) return skip_bytes(fp, *bytes);
     snapshot.ntheta = ntheta;
     snapshot.nzeta = nzeta;
     for (auto& field : snapshot.half_fields) {
@@ -254,14 +302,15 @@ inline bool write_i32_vec(FILE* fp, const std::vector<int>& v) {
     if (v.size() > static_cast<std::size_t>(MAX_INPUT_PARAMS_VECTOR))
         return false;
     if (!write_i32(fp, static_cast<std::int32_t>(v.size()))) return false;
-    return v.empty() ||
-           write_bytes(fp, v.data(), v.size() * sizeof(std::int32_t));
+    for (int value : v)
+        if (!write_i32(fp, value)) return false;
+    return true;
 }
 inline bool write_f64_vec(FILE* fp, const std::vector<double>& v) {
     if (v.size() > static_cast<std::size_t>(MAX_INPUT_PARAMS_VECTOR))
         return false;
     if (!write_i32(fp, static_cast<std::int32_t>(v.size()))) return false;
-    return v.empty() || write_bytes(fp, v.data(), v.size() * sizeof(double));
+    return write_f64_array(fp, v);
 }
 inline bool read_i32_vec(FILE* fp, std::vector<int>& v, std::string& reason) {
     std::int32_t n = 0;
@@ -274,9 +323,9 @@ inline bool read_i32_vec(FILE* fp, std::vector<int>& v, std::string& reason) {
         return false;
     }
     v.resize(static_cast<std::size_t>(n));
-    return n == 0 ||
-           read_bytes(fp, v.data(),
-                      static_cast<std::size_t>(n) * sizeof(std::int32_t));
+    for (int& value : v)
+        if (!read_i32(fp, value)) return false;
+    return true;
 }
 inline bool read_f64_vec(FILE* fp,
                          std::vector<double>& v,
@@ -291,8 +340,7 @@ inline bool read_f64_vec(FILE* fp,
         return false;
     }
     v.resize(static_cast<std::size_t>(n));
-    return n == 0 || read_bytes(fp, v.data(),
-                                static_cast<std::size_t>(n) * sizeof(double));
+    return read_f64_array(fp, v);
 }
 
 inline bool write_makegrid_parameters(FILE* fp,

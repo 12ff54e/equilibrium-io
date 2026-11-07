@@ -47,6 +47,21 @@ Result<Equilibrium> read(const std::string& path,
     return io_detail::read_record(*reader, path, format, mode);
 }
 
+Result<Equilibrium> read(const std::string& path, const ReadRequest& request) {
+    auto format = detect_format(path);
+    if (!format) return Result<Equilibrium>(format.error());
+    return read(path, format.value(), request);
+}
+
+Result<Equilibrium> read(const std::string& path,
+                         OutputFormat format,
+                         const ReadRequest& request) {
+    if (format == OutputFormat::BINARY) return read_binary(path, request);
+    auto reader = make_reader(format);
+    if (!reader) return Result<Equilibrium>("input codec is unavailable");
+    return reader->read(path, request);
+}
+
 Status write(const std::string& path,
              const EquilibriumView& view,
              WriteOptions options) {

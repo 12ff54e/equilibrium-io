@@ -27,64 +27,103 @@ std::size_t checked_product(std::size_t left, std::size_t right) {
 
 namespace boozer_detail {
 
-void validate_result(const BoozerResult& result) {
-    const int surfaces = result.source_ns - result.grid.first_surface;
-    if (result.spectrum.mmax < 0 || result.spectrum.nmax < 0 || surfaces < 1) {
-        throw std::invalid_argument("inconsistent Boozer result dimensions");
-    }
-    const std::size_t mode_count =
-        checked_product(2 * static_cast<std::size_t>(result.spectrum.mmax) + 1,
-                        2 * static_cast<std::size_t>(result.spectrum.nmax) + 1);
-    if (mode_count > (1U << 22)) {
-        throw std::invalid_argument("Boozer result has too many modes");
-    }
-    const std::size_t points =
-        checked_product(static_cast<std::size_t>(result.grid.ntheta),
-                        static_cast<std::size_t>(result.grid.nzeta));
-    const std::size_t real_count =
-        checked_product(static_cast<std::size_t>(surfaces), points);
-    const std::size_t spectral_count =
-        checked_product(static_cast<std::size_t>(surfaces), mode_count);
-    if (result.source_format_version < 1 || result.source_ns < 2 ||
-        result.nfp < 1 || result.grid.first_surface < 1 ||
-        result.grid.ntheta < 1 || result.grid.nzeta < 1 ||
-        result.s.size() != static_cast<std::size_t>(surfaces) ||
-        result.iota.size() != static_cast<std::size_t>(surfaces) ||
-        result.grid.b2j00.size() != static_cast<std::size_t>(surfaces) ||
-        result.grid.b.size() != real_count ||
-        result.grid.sqrtg_b.size() != real_count ||
-        result.spectrum.m.size() != mode_count ||
-        result.spectrum.n.size() != mode_count ||
-        result.spectrum.r.size() != spectral_count ||
-        result.spectrum.z.size() != spectral_count ||
-        result.spectrum.nu.size() != spectral_count) {
-        throw std::invalid_argument("inconsistent Boozer result dimensions");
-    }
-    const auto finite_reals = [](std::span<const double> values) {
-        return std::ranges::all_of(
-            values, [](double value) { return std::isfinite(value); });
-    };
-    const auto finite_complex =
-        [](std::span<const std::complex<double>> values) {
-            return std::ranges::all_of(values, [](const auto value) {
-                return std::isfinite(value.real()) &&
-                       std::isfinite(value.imag());
-            });
-        };
-    if (!finite_reals(result.s) || !finite_reals(result.iota) ||
-        !finite_reals(result.grid.b) || !finite_reals(result.grid.sqrtg_b) ||
-        !finite_reals(result.grid.b2j00) ||
-        !finite_complex(result.spectrum.r) ||
-        !finite_complex(result.spectrum.z) ||
-        !finite_complex(result.spectrum.nu) ||
-        !(result.resonance_tolerance > 0.0) ||
-        !std::isfinite(result.resonance_tolerance)) {
-        throw std::invalid_argument("Boozer result contains non-finite data");
-    }
-    if (result.profiles) {
-        if (!result.tracing || !result.tracing->magnetic)
+void validate_real_spectrum(const RealBoozerSpectrum& spectrum, int surfaces) {
+    if (surfaces < 1 || spectrum.mmax < 0 || spectrum.nmax < 0)
+        throw std::invalid_argument("invalid real Boozer dimensions");
+    const auto modes =
+        checked_product(static_cast<std::size_t>(spectrum.mmax) + 1,
+                        static_cast<std::size_t>(spectrum.nmax) + 1);
+    if (modes > (1U << 20) || spectrum.m.size() != modes ||
+        spectrum.n.size() != modes)
+        throw std::invalid_argument("invalid real Boozer modes");
+    const auto count =
+        checked_product(modes, static_cast<std::size_t>(surfaces));
+    const std::array families{
+        &spectrum.rmncc,  &spectrum.rmnss,  &spectrum.zmnsc,  &spectrum.zmncs,
+        &spectrum.numnsc, &spectrum.numncs, &spectrum.rmnsc,  &spectrum.rmncs,
+        &spectrum.zmncc,  &spectrum.zmnss,  &spectrum.numncc, &spectrum.numnss};
+    for (std::size_t i = 0; i < families.size(); ++i) {
+        const auto& family = *families[i];
+        if (family.size() != (i < 6 || spectrum.lasym ? count : 0) ||
+            !std::ranges::all_of(family,
+                                 [](double x) { return std::isfinite(x); }))
             throw std::invalid_argument(
-                "Boozer surface profiles require v6 tracing and fields");
+                "invalid real Boozer coefficient array");
+    }
+    for (std::size_t k = 0; k < modes; ++k)
+        if (spectrum.m[k] != static_cast<int>(k % (spectrum.mmax + 1)) ||
+            spectrum.n[k] != static_cast<int>(k / (spectrum.mmax + 1)))
+            throw std::invalid_argument("noncanonical real Boozer modes");
+}
+
+void validate_group(const BoozerResult& result, DataGroup group) {
+    const int surfaces = result.source_ns - result.grid.first_surface;
+    const auto finite_reals = [](std::span<const double> values) {
+        return std::ranges::all_of(values,
+                                   [](double x) { return std::isfinite(x); });
+    };
+    if (result.source_ns < 2 || result.grid.first_surface < 1 || surfaces < 1 ||
+        result.nfp < 1 || result.grid.ntheta < 1 || result.grid.nzeta < 1 ||
+        result.s.size() != static_cast<std::size_t>(surfaces) ||
+        result.iota.size() != result.s.size() || !finite_reals(result.s) ||
+        !finite_reals(result.iota))
+        throw std::invalid_argument("invalid Boozer coordinate grid");
+    const auto real_count = checked_product(
+        static_cast<std::size_t>(surfaces),
+        checked_product(static_cast<std::size_t>(result.grid.ntheta),
+                        static_cast<std::size_t>(result.grid.nzeta)));
+    const auto require = [&](std::span<const double> values,
+                             std::size_t count) {
+        if (values.size() != count || !finite_reals(values))
+            throw std::invalid_argument("invalid Boozer array");
+    };
+    if (group == DataGroup::GEOMETRY) {
+        if (!result.has_geometry())
+            throw std::invalid_argument("missing Boozer geometry");
+        if (result.real_spectrum) {
+            validate_real_spectrum(*result.real_spectrum, surfaces);
+            if (result.real_spectrum->lasym != result.lasym)
+                throw std::invalid_argument(
+                    "inconsistent real Boozer symmetry");
+        }
+        if (result.has_complex_spectrum()) {
+            const auto& spectrum = result.spectrum;
+            if (spectrum.mmax < 0 || spectrum.nmax < 0)
+                throw std::invalid_argument(
+                    "invalid complex Boozer dimensions");
+            const auto modes = checked_product(
+                2 * static_cast<std::size_t>(spectrum.mmax) + 1,
+                2 * static_cast<std::size_t>(spectrum.nmax) + 1);
+            const auto count =
+                checked_product(modes, static_cast<std::size_t>(surfaces));
+            if (modes > (1U << 22) || spectrum.m.size() != modes ||
+                spectrum.n.size() != modes)
+                throw std::invalid_argument("invalid complex Boozer modes");
+            for (const auto* family : {&spectrum.r, &spectrum.z, &spectrum.nu})
+                if (family->size() != count ||
+                    !std::ranges::all_of(*family, [](const auto x) {
+                        return std::isfinite(x.real()) &&
+                               std::isfinite(x.imag());
+                    }))
+                    throw std::invalid_argument(
+                        "invalid complex Boozer coefficient array");
+            for (std::size_t k = 0; k < modes; ++k)
+                if (spectrum.m[k] !=
+                        static_cast<int>(k % (2 * spectrum.mmax + 1)) -
+                            spectrum.mmax ||
+                    spectrum.n[k] !=
+                        static_cast<int>(k / (2 * spectrum.mmax + 1)) -
+                            spectrum.nmax)
+                    throw std::invalid_argument(
+                        "noncanonical complex Boozer modes");
+        }
+    }
+    if (group == DataGroup::STRENGTH) {
+        require(result.grid.b, real_count);
+        require(result.grid.sqrtg_b, real_count);
+        require(result.grid.b2j00, surfaces);
+    }
+    if (group == DataGroup::PROFILES && result.profiles) {
         const auto& profiles = *result.profiles;
         for (const auto* values :
              {&profiles.pressure, &profiles.current_i, &profiles.current_g}) {
@@ -104,7 +143,7 @@ void validate_result(const BoozerResult& result) {
                     "Boozer profile G+iota*I is zero or ill-conditioned");
         }
     }
-    if (result.tracing) {
+    if (group == DataGroup::TRACING && result.tracing) {
         const auto& tracing = *result.tracing;
         const int width = static_cast<int>(result.radial_order);
         if ((width != 2 && width != 4) || result.source_ns <= width ||
@@ -125,9 +164,6 @@ void validate_result(const BoozerResult& result) {
         require(tracing.aphi, tracing.aphi.size());
         double profile_sum = 0.0;
         profile_detail::validate_flux_type(tracing.pflux_type, tracing.aphi);
-        if (tracing.pflux_type == "list" && !result.profiles)
-            throw std::invalid_argument(
-                "list flux export requires surface profiles");
         if (tracing.pflux_type == "list")
             profile_sum =
                 profile_detail::evaluate_list(tracing.aphi, 1.0, true);
@@ -175,41 +211,48 @@ void validate_result(const BoozerResult& result) {
                             static_cast<std::size_t>(result.source_nzeta)));
         for (const auto& field : tracing.axis_half_fields)
             require(field, half_count);
-        if (tracing.magnetic) {
-            const auto& magnetic = *tracing.magnetic;
-            for (const auto& field : magnetic.fields)
-                require(field, real_count);
-            for (std::size_t j = 0; j < real_count; ++j) {
-                const auto& f = magnetic.fields;
-                const double b2 = f[EquilibriumSnapshot::BSUPS][j] *
-                                      f[EquilibriumSnapshot::BSUBS][j] +
-                                  f[EquilibriumSnapshot::BSUPU][j] *
-                                      f[EquilibriumSnapshot::BSUBU][j] +
-                                  f[EquilibriumSnapshot::BSUPV][j] *
-                                      f[EquilibriumSnapshot::BSUBV][j];
-                if (!(b2 > 0.0) || !std::isfinite(b2) ||
-                    f[EquilibriumSnapshot::SQRTG][j] == 0.0)
-                    throw std::invalid_argument(
-                        "invalid Boozer magnetic field");
-            }
-            require(result.grid.source_theta_shift, real_count);
-            require(result.grid.nu, real_count);
-        }
     }
-    std::size_t mode = 0;
-    for (int n = -result.spectrum.nmax; n <= result.spectrum.nmax; ++n) {
-        for (int m = -result.spectrum.mmax; m <= result.spectrum.mmax; ++m) {
-            if (result.spectrum.m[mode] != m || result.spectrum.n[mode] != n) {
-                throw std::invalid_argument(
-                    "Boozer result has noncanonical mode ordering");
-            }
-            ++mode;
+    if (group == DataGroup::MAGNETIC && result.has_magnetic()) {
+        const auto& magnetic = result.magnetic_data()->get();
+        for (const auto& field : magnetic.fields) require(field, real_count);
+        for (std::size_t j = 0; j < real_count; ++j) {
+            const auto& f = magnetic.fields;
+            const double b2 = f[EquilibriumSnapshot::BSUPS][j] *
+                                  f[EquilibriumSnapshot::BSUBS][j] +
+                              f[EquilibriumSnapshot::BSUPU][j] *
+                                  f[EquilibriumSnapshot::BSUBU][j] +
+                              f[EquilibriumSnapshot::BSUPV][j] *
+                                  f[EquilibriumSnapshot::BSUBV][j];
+            if (!(b2 > 0.0) || !std::isfinite(b2) ||
+                f[EquilibriumSnapshot::SQRTG][j] == 0.0)
+                throw std::invalid_argument("invalid Boozer magnetic field");
         }
+        require(result.grid.source_theta_shift, real_count);
+        require(result.grid.nu, real_count);
     }
+}
+
+void validate_result(const BoozerResult& result) {
+    if (result.source_format_version < 1 || !(result.resonance_tolerance > 0) ||
+        !std::isfinite(result.resonance_tolerance))
+        throw std::invalid_argument("invalid Boozer result metadata");
+    for (auto group :
+         {DataGroup::GEOMETRY, DataGroup::STRENGTH, DataGroup::TRACING,
+          DataGroup::MAGNETIC, DataGroup::PROFILES})
+        validate_group(result, group);
+    // Current output schemas store these records together. Selected reads may
+    // expose them independently, but cannot be written as a complete file.
+    if (result.independent_magnetic ||
+        (result.profiles && (!result.tracing || !result.tracing->magnetic)) ||
+        (result.tracing && result.tracing->pflux_type == "list" &&
+         !result.profiles))
+        throw std::invalid_argument(
+            "selected Boozer groups cannot form a complete output");
 }
 
 RealBoozerSpectrum make_real_spectrum(const BoozerResult& result) {
     validate_result(result);
+    if (result.real_spectrum) return *result.real_spectrum;
     RealBoozerSpectrum output;
     output.lasym = result.lasym;
     output.mmax = result.spectrum.mmax;
@@ -323,6 +366,7 @@ MixedGridSpectrum restore_complex_spectrum(const RealBoozerSpectrum& spectrum,
                                            int source_ns,
                                            int first_surface) {
     const int surfaces = source_ns - first_surface;
+    validate_real_spectrum(spectrum, surfaces);
     if (spectrum.mmax < 0 || spectrum.nmax < 0) {
         throw std::invalid_argument("invalid real Boozer mode bounds");
     }
@@ -398,39 +442,57 @@ MixedGridSpectrum restore_complex_spectrum(const RealBoozerSpectrum& spectrum,
             const double integral_scale =
                 FOUR_PI_SQUARED / (static_cast<double>(m == 0 ? 1 : 2) *
                                    static_cast<double>(n == 0 ? 1 : 2));
+            // sin(0) contributes nothing. Keep the stored real values, but
+            // do not let coincident signed modes pick up inactive terms.
+            const auto coefficient = [&](const auto& family, bool sine_m,
+                                         bool sine_n) {
+                return (sine_m && m == 0) || (sine_n && n == 0)
+                           ? 0.0
+                           : family[source];
+            };
             std::complex<double> r_plus{
-                integral_scale *
-                    (spectrum.rmncc[source] - spectrum.rmnss[source]),
+                integral_scale * (coefficient(spectrum.rmncc, false, false) -
+                                  coefficient(spectrum.rmnss, true, true)),
                 0.0};
             std::complex<double> r_minus{
-                integral_scale *
-                    (spectrum.rmncc[source] + spectrum.rmnss[source]),
+                integral_scale * (coefficient(spectrum.rmncc, false, false) +
+                                  coefficient(spectrum.rmnss, true, true)),
                 0.0};
             std::complex<double> z_plus{
-                0.0, -integral_scale *
-                         (spectrum.zmnsc[source] + spectrum.zmncs[source])};
+                0.0,
+                -integral_scale * (coefficient(spectrum.zmnsc, true, false) +
+                                   coefficient(spectrum.zmncs, false, true))};
             std::complex<double> z_minus{
-                0.0, integral_scale *
-                         (-spectrum.zmnsc[source] + spectrum.zmncs[source])};
+                0.0,
+                integral_scale * (-coefficient(spectrum.zmnsc, true, false) +
+                                  coefficient(spectrum.zmncs, false, true))};
             std::complex<double> nu_plus{
-                0.0, -integral_scale *
-                         (spectrum.numnsc[source] + spectrum.numncs[source])};
+                0.0,
+                -integral_scale * (coefficient(spectrum.numnsc, true, false) +
+                                   coefficient(spectrum.numncs, false, true))};
             std::complex<double> nu_minus{
-                0.0, integral_scale *
-                         (-spectrum.numnsc[source] + spectrum.numncs[source])};
+                0.0,
+                integral_scale * (-coefficient(spectrum.numnsc, true, false) +
+                                  coefficient(spectrum.numncs, false, true))};
             if (spectrum.lasym) {
                 r_plus.imag(-integral_scale *
-                            (spectrum.rmnsc[source] + spectrum.rmncs[source]));
-                r_minus.imag(integral_scale * (-spectrum.rmnsc[source] +
-                                               spectrum.rmncs[source]));
+                            (coefficient(spectrum.rmnsc, true, false) +
+                             coefficient(spectrum.rmncs, false, true)));
+                r_minus.imag(integral_scale *
+                             (-coefficient(spectrum.rmnsc, true, false) +
+                              coefficient(spectrum.rmncs, false, true)));
                 z_plus.real(integral_scale *
-                            (spectrum.zmncc[source] - spectrum.zmnss[source]));
+                            (coefficient(spectrum.zmncc, false, false) -
+                             coefficient(spectrum.zmnss, true, true)));
                 z_minus.real(integral_scale *
-                             (spectrum.zmncc[source] + spectrum.zmnss[source]));
-                nu_plus.real(integral_scale * (spectrum.numncc[source] -
-                                               spectrum.numnss[source]));
-                nu_minus.real(integral_scale * (spectrum.numncc[source] +
-                                                spectrum.numnss[source]));
+                             (coefficient(spectrum.zmncc, false, false) +
+                              coefficient(spectrum.zmnss, true, true)));
+                nu_plus.real(integral_scale *
+                             (coefficient(spectrum.numncc, false, false) -
+                              coefficient(spectrum.numnss, true, true)));
+                nu_minus.real(integral_scale *
+                              (coefficient(spectrum.numncc, false, false) +
+                               coefficient(spectrum.numnss, true, true)));
             }
             const auto target = [&](int signed_m, int signed_n) {
                 return static_cast<std::size_t>(

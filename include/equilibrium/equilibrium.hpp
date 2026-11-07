@@ -3,6 +3,7 @@
 #include "equilibrium/equilibrium_profiles.hpp"
 #include "equilibrium/equilibrium_snapshot.hpp"
 #include "equilibrium/output_spec.hpp"
+#include "equilibrium/read_request.hpp"
 #include "equilibrium/run_report.hpp"
 
 #include <functional>
@@ -47,6 +48,14 @@ struct BasicEquilibrium {
     std::optional<Input> input;
     std::optional<Provenance> provenance;
     SourceInfo source;
+    ReadDiagnostics read_diagnostics;
+
+    bool has_geometry() const { return !families.empty(); }
+    bool has_fields() const { return fields.has_value(); }
+    bool has_grid() const { return grid.has_value(); }
+    bool has_input() const { return input.has_value(); }
+    bool has_provenance() const { return provenance.has_value(); }
+    bool has_profiles() const { return profiles.has_value(); }
 
     bool lasym() const { return families.size() == 12; }
 };
@@ -70,6 +79,7 @@ inline EquilibriumView as_view(const Equilibrium& owner) {
     view.families.assign(owner.families.begin(), owner.families.end());
     view.grid = owner.grid;
     view.source = owner.source;
+    view.read_diagnostics = owner.read_diagnostics;
     if (owner.fields) {
         auto& fields = view.fields.emplace();
         fields.ntheta = owner.fields->ntheta;

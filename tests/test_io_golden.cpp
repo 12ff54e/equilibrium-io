@@ -393,6 +393,13 @@ static void run_precision() {
                       back.stages.empty() &&
                       back.input_params == equilibrium::InputParams{},
                   "v1 historical: trailer fields land correctly");
+            {
+                std::ofstream trailing(v1OldPath,
+                                       std::ios::binary | std::ios::app);
+                trailing.put('x');
+            }
+            check(!r->read(v1OldPath, back),
+                  "v1 historical: complete read rejects trailing bytes");
         }
         remove(v1OldPath.c_str());
     }

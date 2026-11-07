@@ -135,8 +135,8 @@ void write_boozer_hdf5(const std::filesystem::path& path,
                            result.grid.first_surface);
     write_scalar_attribute(file, "ntheta", H5T_NATIVE_INT, result.grid.ntheta);
     write_scalar_attribute(file, "nzeta", H5T_NATIVE_INT, result.grid.nzeta);
-    write_scalar_attribute(file, "mmax", H5T_NATIVE_INT, result.spectrum.mmax);
-    write_scalar_attribute(file, "nmax", H5T_NATIVE_INT, result.spectrum.nmax);
+    write_scalar_attribute(file, "mmax", H5T_NATIVE_INT, spectrum.mmax);
+    write_scalar_attribute(file, "nmax", H5T_NATIVE_INT, spectrum.nmax);
     const int radial_order = static_cast<int>(result.radial_order);
     write_scalar_attribute(file, "radial_order", H5T_NATIVE_INT, radial_order);
     write_scalar_attribute(file, "resonance_tolerance", H5T_NATIVE_DOUBLE,

@@ -199,8 +199,8 @@ void write_boozer_netcdf(const std::filesystem::path& path,
         put_int("first_surface", result.grid.first_surface);
         put_int("ntheta", result.grid.ntheta);
         put_int("nzeta", result.grid.nzeta);
-        put_int("mmax", result.spectrum.mmax);
-        put_int("nmax", result.spectrum.nmax);
+        put_int("mmax", spectrum.mmax);
+        put_int("nmax", spectrum.nmax);
         put_int("radial_order", static_cast<int>(result.radial_order));
         put_double("resonance_tolerance", result.resonance_tolerance);
 

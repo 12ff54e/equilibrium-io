@@ -75,27 +75,11 @@ inline constexpr std::string_view ASYMMETRIC_FOURIER_CONVENTION =
     "cs*cos(m*theta_b)*sin(n*alpha)]; m,n are nonnegative "
     "and alpha is a field-period angle; no stellarator symmetry is imposed";
 
-struct RealBoozerSpectrum {
-    bool lasym = false;
-    int mmax = 0;
-    int nmax = 0;
-    std::vector<int> m;
-    std::vector<int> n;
-    std::vector<double> rmncc;
-    std::vector<double> rmnss;
-    std::vector<double> zmnsc;
-    std::vector<double> zmncs;
-    std::vector<double> numnsc;
-    std::vector<double> numncs;
-    std::vector<double> rmnsc;
-    std::vector<double> rmncs;
-    std::vector<double> zmncc;
-    std::vector<double> zmnss;
-    std::vector<double> numncc;
-    std::vector<double> numnss;
-};
+using ::equilibrium::RealBoozerSpectrum;
 
 void validate_result(const BoozerResult& result);
+void validate_group(const BoozerResult& result, DataGroup group);
+void validate_real_spectrum(const RealBoozerSpectrum& spectrum, int surfaces);
 RealBoozerSpectrum make_real_spectrum(const BoozerResult& result);
 MixedGridSpectrum restore_complex_spectrum(const RealBoozerSpectrum& spectrum,
                                            int source_ns,

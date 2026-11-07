@@ -15,6 +15,8 @@
 #include "hdf5_output.hpp"
 #include "internal_factories.hpp"
 #include "io_common.hpp"
+#include "metadata_members.hpp"
+#include "read_selection.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -547,6 +549,23 @@ class Hdf5V1Reader final : public Reader {
     Result<EquilibriumSnapshot> read(
         const std::string& path,
         std::optional<std::reference_wrapper<RunReport>> report) override {
+        return decode(path, report, nullptr);
+    }
+    Result<Equilibrium> read(const std::string& path,
+                             const ReadRequest& request) override {
+        io_detail::ContainerReadSelection selected(request);
+        RunReport report;
+        auto state = decode(path, std::ref(report), &selected);
+        if (!state) return Result<Equilibrium>(state.error());
+        return selected.finish(std::move(state.value()), std::move(report),
+                               OutputFormat::HDF5);
+    }
+
+   private:
+    Result<EquilibriumSnapshot> decode(
+        const std::string& path,
+        std::optional<std::reference_wrapper<RunReport>> report,
+        io_detail::ContainerReadSelection* selected) {
         hid_t fid = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
         if (fid < 0) {
             return Result<EquilibriumSnapshot>("HDF5: cannot open " + path);
@@ -740,488 +759,678 @@ class Hdf5V1Reader final : public Reader {
                 if (!bytes) return fail("state byte count overflows size_t");
             }
 
+            const auto has_metadata = [&](const auto& names) {
+                for (const char* name : names) {
+                    if (H5Aexists(fid, name) > 0 ||
+                        H5Lexists(fid, name, H5P_DEFAULT) > 0)
+                        return true;
+                }
+                return false;
+            };
+            const auto wants = [&](DataGroup group) {
+                return !selected || selected->selection.wants(group);
+            };
+            const auto decode_group = [&](DataGroup group, auto present,
+                                          auto decode) {
+                if (!wants(group)) return false;
+                const bool exists = present();
+                Status status;
+                if (exists || !selected) status = decode();
+                if (!selected) {
+                    if (!status) throw std::runtime_error(status.error());
+                    return true;
+                }
+                return selected->selection.accept(group, exists,
+                                                  status ? "" : status.error());
+            };
+            const auto group_fail = [](const std::string& message) {
+                return Status(message);
+            };
             EquilibriumSnapshot snapshot;
             snapshot.source_version = 1;
             snapshot.ns = ns;
             snapshot.mnmax = mnmax;
-            const char* fam_names[12] = {"rmncc", "zmnsc", "lmnsc", "rmnss",
-                                         "zmncs", "lmncs", "rmnsc", "zmncc",
-                                         "lmncc", "rmncs", "zmnss", "lmnss"};
-            int asymmetric_families = 0;
-            for (int c = 6; c < 12; ++c)
-                if (H5Lexists(fid, fam_names[c], H5P_DEFAULT) > 0)
-                    ++asymmetric_families;
-            if (asymmetric_families != 0 && asymmetric_families != 6)
-                return fail("incomplete asymmetric spectral families");
-            if (asymmetric_families)
-                snapshot.families.resize(EquilibriumSnapshot::ASYMMETRIC_COUNT);
+            if (!decode_group(
+                    DataGroup::GEOMETRY, [] { return true; },
+                    [&]() -> Status {
+                        auto fail = group_fail;
+                        const char* fam_names[12] = {"rmncc", "zmnsc", "lmnsc",
+                                                     "rmnss", "zmncs", "lmncs",
+                                                     "rmnsc", "zmncc", "lmncc",
+                                                     "rmncs", "zmnss", "lmnss"};
+                        int asymmetric_families = 0;
+                        for (int c = 6; c < 12; ++c)
+                            if (H5Lexists(fid, fam_names[c], H5P_DEFAULT) > 0)
+                                ++asymmetric_families;
+                        if (asymmetric_families != 0 &&
+                            asymmetric_families != 6)
+                            return fail(
+                                "incomplete asymmetric spectral families");
+                        if (asymmetric_families)
+                            snapshot.families.resize(
+                                EquilibriumSnapshot::ASYMMETRIC_COUNT);
 
-            // The file layout is [surface, mode] (C order over the (ns, mnmax)
-            // dataspace) while the snapshot is mode-major (index = m*ns + j). A
-            // whole-slab read must therefore TRANSPOSE — the exact
-            // declaration/data-order trap the blueprint pins (completion plan
-            // step 2.3). The writers use per-mode hyperslabs, which is the
-            // transpose-aware mirror image.
-            std::vector<double> tmp(*n_opt);
-            for (int c = 0; c < snapshot.components(); ++c) {
-                // EVERY family must independently satisfy rank 2 + the exact
-                // [ns, mnmax] extents + a double-compatible type before the
-                // read (reader-rank-hardening §3): rmncc alone no longer
-                // vouches for the other five.
-                H5Closer ds(H5Dopen2(fid, fam_names[c], H5P_DEFAULT));
-                if (ds.get() < 0) {
-                    return fail("missing state dataset (" +
-                                std::string(fam_names[c]) + ")");
+                        // The file layout is [surface, mode] (C order over the
+                        // (ns, mnmax) dataspace) while the snapshot is
+                        // mode-major (index = m*ns + j). A whole-slab read must
+                        // therefore TRANSPOSE — the exact
+                        // declaration/data-order trap the blueprint pins
+                        // (completion plan step 2.3). The writers use per-mode
+                        // hyperslabs, which is the transpose-aware mirror
+                        // image.
+                        std::vector<double> tmp(*n_opt);
+                        for (int c = 0; c < snapshot.components(); ++c) {
+                            // EVERY family must independently satisfy rank 2 +
+                            // the exact [ns, mnmax] extents + a
+                            // double-compatible type before the read
+                            // (reader-rank-hardening §3): rmncc alone no longer
+                            // vouches for the other five.
+                            H5Closer ds(
+                                H5Dopen2(fid, fam_names[c], H5P_DEFAULT));
+                            if (ds.get() < 0) {
+                                return fail("missing state dataset (" +
+                                            std::string(fam_names[c]) + ")");
+                            }
+                            hsize_t fam_dims[2] = {0, 0};
+                            if (!get_dim_exact(fam_names[c], 2, fam_dims) ||
+                                fam_dims[0] != state_dims[0] ||
+                                fam_dims[1] != state_dims[1]) {
+                                return fail("malformed state dataset (" +
+                                            std::string(fam_names[c]) + ")");
+                            }
+                            if (!dataset_is_double(ds.get())) {
+                                return fail("malformed state dataset type (" +
+                                            std::string(fam_names[c]) + ")");
+                            }
+                            H5Closer sp(
+                                H5Screate_simple(2, state_dims, nullptr));
+                            if (sp.get() < 0) return fail("state read failed");
+                            const herr_t r =
+                                H5Dread(ds.get(), H5T_NATIVE_DOUBLE, sp.get(),
+                                        H5S_ALL, H5P_DEFAULT, tmp.data());
+                            if (r < 0) return fail("state read failed");
+                            snapshot.families[c].resize(*n_opt);
+                            for (int m = 0; m < mnmax; ++m) {
+                                for (int j = 0; j < ns; ++j) {
+                                    snapshot.families[c][(size_t)m * ns + j] =
+                                        tmp[(size_t)j * mnmax + m];
+                                }
+                            }
+                        }
+
+                        return {};
+                    }))
+                snapshot.families.clear();
+            if (wants(DataGroup::FIELDS)) {
+                int present_fields = 0;
+                for (const char* name : HALF_FIELD_NAMES) {
+                    const htri_t present = H5Lexists(fid, name, H5P_DEFAULT);
+                    if (present < 0)
+                        throw std::runtime_error(
+                            "cannot inspect field datasets");
+                    present_fields += present > 0 ? 1 : 0;
                 }
-                hsize_t fam_dims[2] = {0, 0};
-                if (!get_dim_exact(fam_names[c], 2, fam_dims) ||
-                    fam_dims[0] != state_dims[0] ||
-                    fam_dims[1] != state_dims[1]) {
-                    return fail("malformed state dataset (" +
-                                std::string(fam_names[c]) + ")");
+                for (const char* name : FULL_FIELD_NAMES) {
+                    const htri_t present = H5Lexists(fid, name, H5P_DEFAULT);
+                    if (present < 0)
+                        throw std::runtime_error(
+                            "cannot inspect field datasets");
+                    present_fields += present > 0 ? 1 : 0;
                 }
-                if (!dataset_is_double(ds.get())) {
-                    return fail("malformed state dataset type (" +
-                                std::string(fam_names[c]) + ")");
-                }
-                H5Closer sp(H5Screate_simple(2, state_dims, nullptr));
-                if (sp.get() < 0) return fail("state read failed");
-                const herr_t r = H5Dread(ds.get(), H5T_NATIVE_DOUBLE, sp.get(),
-                                         H5S_ALL, H5P_DEFAULT, tmp.data());
-                if (r < 0) return fail("state read failed");
-                snapshot.families[c].resize(*n_opt);
-                for (int m = 0; m < mnmax; ++m) {
-                    for (int j = 0; j < ns; ++j) {
-                        snapshot.families[c][(size_t)m * ns + j] =
-                            tmp[(size_t)j * mnmax + m];
-                    }
-                }
-            }
-            int present_fields = 0;
-            for (const char* name : HALF_FIELD_NAMES) {
-                const htri_t present = H5Lexists(fid, name, H5P_DEFAULT);
-                if (present < 0) return fail("cannot inspect field datasets");
-                present_fields += present > 0 ? 1 : 0;
-            }
-            for (const char* name : FULL_FIELD_NAMES) {
-                const htri_t present = H5Lexists(fid, name, H5P_DEFAULT);
-                if (present < 0) return fail("cannot inspect field datasets");
-                present_fields += present > 0 ? 1 : 0;
-            }
-            if (present_fields != 0) {
-                constexpr int EXPECTED_FIELDS =
-                    static_cast<int>(EquilibriumSnapshot::HALF_FIELD_COUNT) +
-                    static_cast<int>(EquilibriumSnapshot::FULL_FIELD_COUNT);
-                if (present_fields != EXPECTED_FIELDS) {
-                    return fail("incomplete derived-field datasets");
-                }
-                hsize_t half_dims[3] = {0, 0, 0};
-                hsize_t full_dims[3] = {0, 0, 0};
-                if (!get_dim_exact(HALF_FIELD_NAMES[0], 3, half_dims) ||
-                    !get_dim_exact(FULL_FIELD_NAMES[0], 3, full_dims) ||
-                    half_dims[0] != static_cast<hsize_t>(ns - 1) ||
-                    full_dims[0] != static_cast<hsize_t>(ns) ||
-                    half_dims[1] != full_dims[1] ||
-                    half_dims[2] != full_dims[2] || half_dims[1] < 1 ||
-                    half_dims[2] < 1 || half_dims[1] > INT_MAX ||
-                    half_dims[2] > INT_MAX) {
-                    return fail("malformed derived-field dimensions");
-                }
-                snapshot.nzeta = static_cast<int>(half_dims[1]);
-                snapshot.ntheta = static_cast<int>(half_dims[2]);
-                for (int c = 0; c < EquilibriumSnapshot::HALF_FIELD_COUNT;
-                     ++c) {
-                    if (!get_dbl_field(HALF_FIELD_NAMES[c], half_dims,
-                                       snapshot.half_fields[c])) {
-                        return fail("malformed half-grid field dataset (" +
-                                    std::string(HALF_FIELD_NAMES[c]) + ")");
-                    }
-                }
-                for (int c = 0; c < EquilibriumSnapshot::FULL_FIELD_COUNT;
-                     ++c) {
-                    if (!get_dbl_field(FULL_FIELD_NAMES[c], full_dims,
-                                       snapshot.full_fields[c])) {
-                        return fail("malformed full-grid field dataset (" +
-                                    std::string(FULL_FIELD_NAMES[c]) + ")");
-                    }
+
+                if (!decode_group(
+                        DataGroup::FIELDS, [&] { return present_fields != 0; },
+                        [&]() -> Status {
+                            auto fail = group_fail;
+                            if (present_fields != 0) {
+                                constexpr int EXPECTED_FIELDS =
+                                    static_cast<int>(
+                                        EquilibriumSnapshot::HALF_FIELD_COUNT) +
+                                    static_cast<int>(
+                                        EquilibriumSnapshot::FULL_FIELD_COUNT);
+                                if (present_fields != EXPECTED_FIELDS) {
+                                    return fail(
+                                        "incomplete derived-field datasets");
+                                }
+                                hsize_t half_dims[3] = {0, 0, 0};
+                                hsize_t full_dims[3] = {0, 0, 0};
+                                if (!get_dim_exact(HALF_FIELD_NAMES[0], 3,
+                                                   half_dims) ||
+                                    !get_dim_exact(FULL_FIELD_NAMES[0], 3,
+                                                   full_dims) ||
+                                    half_dims[0] !=
+                                        static_cast<hsize_t>(ns - 1) ||
+                                    full_dims[0] != static_cast<hsize_t>(ns) ||
+                                    half_dims[1] != full_dims[1] ||
+                                    half_dims[2] != full_dims[2] ||
+                                    half_dims[1] < 1 || half_dims[2] < 1 ||
+                                    half_dims[1] > INT_MAX ||
+                                    half_dims[2] > INT_MAX) {
+                                    return fail(
+                                        "malformed derived-field dimensions");
+                                }
+                                snapshot.nzeta = static_cast<int>(half_dims[1]);
+                                snapshot.ntheta =
+                                    static_cast<int>(half_dims[2]);
+                                for (int c = 0;
+                                     c < EquilibriumSnapshot::HALF_FIELD_COUNT;
+                                     ++c) {
+                                    if (!get_dbl_field(
+                                            HALF_FIELD_NAMES[c], half_dims,
+                                            snapshot.half_fields[c])) {
+                                        return fail(
+                                            "malformed half-grid field dataset "
+                                            "(" +
+                                            std::string(HALF_FIELD_NAMES[c]) +
+                                            ")");
+                                    }
+                                }
+                                for (int c = 0;
+                                     c < EquilibriumSnapshot::FULL_FIELD_COUNT;
+                                     ++c) {
+                                    if (!get_dbl_field(
+                                            FULL_FIELD_NAMES[c], full_dims,
+                                            snapshot.full_fields[c])) {
+                                        return fail(
+                                            "malformed full-grid field dataset "
+                                            "(" +
+                                            std::string(FULL_FIELD_NAMES[c]) +
+                                            ")");
+                                    }
+                                }
+                            }
+
+                            return {};
+                        })) {
+                    snapshot.ntheta = snapshot.nzeta = 0;
+                    for (auto& values : snapshot.half_fields) values.clear();
+                    for (auto& values : snapshot.full_fields) values.clear();
                 }
             }
             if (report) {
                 // Parse transactionally: a malformed late field must not leave
                 // a partially populated report visible to the caller.
                 RunReport parsed_report;
-                int precision = 0, status = 0, total = 0, dirty = 0;
-                if (!get_int_attr("precision", precision) ||
-                    !get_int_attr("status", status) ||
-                    !get_int_attr("total_iterations", total) ||
-                    !get_int_attr("build_dirty", dirty)) {
-                    return fail("missing run outcome attributes");
-                }
-                // Closed-range validation of the serialized scalars (handoff
-                // §4).
-                if (precision < 0 || precision > 1) {
-                    return fail("invalid precision scalar");
-                }
-                if (status < 0 || status > 4) {
-                    return fail("invalid run status scalar");
-                }
-                if (total < 0) {
-                    return fail("negative total iteration count");
-                }
-                if (dirty != 0 && dirty != 1) {
-                    return fail("invalid build_dirty scalar");
-                }
-                parsed_report.status = static_cast<RunStatus>(status);
-                parsed_report.total_effective_iterations = total;
-                parsed_report.build.dirty = (dirty != 0);
-                parsed_report.build.scalar_type =
-                    (precision == 0) ? "double" : "float";
-                if (!get_str_attr(fid, "revision",
-                                  parsed_report.build.revision) ||
-                    !get_str_attr(fid, "build_type",
-                                  parsed_report.build.build_type) ||
-                    !get_str_attr(fid, "precision_policy",
-                                  parsed_report.build.precision_policy) ||
-                    !get_str_attr(fid, "compile_flags",
-                                  parsed_report.build.compile_flags) ||
-                    !get_str_attr(fid, "source_path",
-                                  parsed_report.input.source_path) ||
-                    !get_str_attr(fid, "source_hash",
-                                  parsed_report.input.source_hash) ||
-                    !get_str_attr(fid, "gpu_name",
-                                  parsed_report.runtime.gpu_name) ||
-                    !get_str_attr(fid, "driver",
-                                  parsed_report.runtime.driver) ||
-                    !get_str_attr(fid, "runtime",
-                                  parsed_report.runtime.runtime) ||
-                    !get_str_attr(fid, "toolkit",
-                                  parsed_report.runtime.toolkit)) {
-                    return fail("missing provenance attributes");
-                }
-                hsize_t d_stages[1] = {0};
-                if (!get_dim_exact("stage_ns", 1, d_stages)) {
-                    return fail("missing/malformed stage_ns");
-                }
-                const size_t nstages = (size_t)d_stages[0];
-                // restart_iteration is OPTIONAL only in the sense of being
-                // absent: when the dataset exists it must be rank 1 (a rank-0
-                // or rank-2 dataset is malformed and must fail, not be
-                // skipped).
-                hsize_t d_restarts[1] = {0};
-                size_t nrestarts = 0;
-                {
-                    H5Closer probe(
-                        H5Dopen2(fid, "restart_iteration", H5P_DEFAULT));
-                    if (probe.get() >= 0 &&
-                        !get_dim_exact("restart_iteration", 1, d_restarts)) {
-                        return fail("malformed restart_iteration dataset");
-                    }
-                    if (probe.get() >= 0) nrestarts = (size_t)d_restarts[0];
-                }
-                // Documented stage/restart resource caps (handoff §4).
-                if (nstages > equilibrium::io_detail::MAX_STAGE_COUNT ||
-                    nrestarts > equilibrium::io_detail::MAX_STAGE_COUNT) {
-                    return fail(
-                        "stage/restart dimensions exceed the resource cap");
-                }
-                std::vector<int> stage_ns, stage_iter, stage_conv, rst_off;
-                std::vector<double> st_fsqr, st_fsqz, st_fsql;
-                std::vector<int> rst_iter;
-                if (!get_int_arr("stage_ns", stage_ns, nstages) ||
-                    !get_int_arr("stage_iterations", stage_iter, nstages) ||
-                    !get_int_arr("stage_converged", stage_conv, nstages) ||
-                    !get_int_arr("restart_stage_offset", rst_off, nstages) ||
-                    !get_dbl_arr("stage_fsqr", st_fsqr, nstages) ||
-                    !get_dbl_arr("stage_fsqz", st_fsqz, nstages) ||
-                    !get_dbl_arr("stage_fsql", st_fsql, nstages) ||
-                    (nrestarts > 0 &&
-                     !get_int_arr("restart_iteration", rst_iter, nrestarts))) {
-                    return fail("stage history read failed");
-                }
-                // Validate the offsets BEFORE they index rst_iter
-                // (completion-plan follow-up §2.2): negative, descending,
-                // oversized, or non-zero first offsets must fail cleanly
-                // instead of reading out of bounds.
-                {
-                    const std::string off_err =
-                        validate_restart_offsets(rst_off, nstages, nrestarts);
-                    if (!off_err.empty()) {
-                        return fail("invalid restart offsets: " + off_err);
-                    }
-                }
-                for (size_t g = 0; g < nstages; ++g) {
-                    if (stage_ns[g] <= 0) {
-                        return fail("nonpositive stage surface count");
-                    }
-                    if (stage_iter[g] < 0) {
-                        return fail("negative stage iteration count");
-                    }
-                    if (stage_conv[g] != 0 && stage_conv[g] != 1) {
-                        return fail("invalid stage_converged value");
-                    }
-                }
-                for (int iteration : rst_iter) {
-                    if (iteration < 0) {
-                        return fail("negative restart iteration");
-                    }
-                }
-                for (size_t g = 0; g < nstages; ++g) {
-                    StageReport st;
-                    st.ns = stage_ns[g];
-                    st.effective_iterations = stage_iter[g];
-                    st.converged = (stage_conv[g] != 0);
-                    st.final_residual.fsqr = st_fsqr[g];
-                    st.final_residual.fsqz = st_fsqz[g];
-                    st.final_residual.fsql = st_fsql[g];
-                    const size_t begin = (size_t)rst_off[g];
-                    const size_t end =
-                        (g + 1 < nstages) ? (size_t)rst_off[g + 1] : nrestarts;
-                    for (size_t k = begin; k < end; ++k) {
-                        st.restarts.push_back(RestartEvent{rst_iter[k]});
-                    }
-                    parsed_report.stages.push_back(std::move(st));
-                }
-                // ---- embedded normalized-input record ----
-                // All-or-nothing: when the mpol attribute exists the full
-                // record is required (pre-record containers keep the
-                // default-empty InputParams); every read gets the
-                // exact-rank/type/extent hardening above.
-                {
-                    H5Closer aid(H5Aopen(fid, "mpol", H5P_DEFAULT));
-                    if (aid.get() >= 0) {
-                        InputParams ip;
-                        if (!get_int_attr("mpol", ip.mpol) ||
-                            !get_int_attr("ntor", ip.ntor) ||
-                            !get_int_attr("nfp", ip.nfp) ||
-                            !get_int_attr("ntheta", ip.ntheta) ||
-                            !get_int_attr("nzeta", ip.nzeta) ||
-                            !get_int_attr("ncurr", ip.ncurr) ||
-                            !get_dbl_attr("delt", ip.delt) ||
-                            !get_dbl_attr("phiedge", ip.phiedge) ||
-                            !get_dbl_attr("pres_scale", ip.pres_scale) ||
-                            !get_dbl_attr("adiabatic_index",
-                                          ip.adiabatic_index) ||
-                            !get_dbl_attr("spres_ped", ip.spres_ped) ||
-                            !get_dbl_attr("bloat", ip.bloat) ||
-                            !get_dbl_attr("curtor", ip.curtor) ||
-                            !get_dbl_attr("tcon0", ip.tcon0)) {
-                            return fail("malformed embedded input record");
+                decode_group(
+                    DataGroup::PROVENANCE,
+                    [&] { return has_metadata(io_detail::PROVENANCE_MEMBERS); },
+                    [&]() -> Status {
+                        auto fail = group_fail;
+                        int precision = 0, status = 0, total = 0, dirty = 0;
+                        if (!get_int_attr("precision", precision) ||
+                            !get_int_attr("status", status) ||
+                            !get_int_attr("total_iterations", total) ||
+                            !get_int_attr("build_dirty", dirty)) {
+                            return fail("missing run outcome attributes");
                         }
+                        // Closed-range validation of the serialized scalars
+                        // (handoff §4).
+                        if (precision < 0 || precision > 1) {
+                            return fail("invalid precision scalar");
+                        }
+                        if (status < 0 || status > 4) {
+                            return fail("invalid run status scalar");
+                        }
+                        if (total < 0) {
+                            return fail("negative total iteration count");
+                        }
+                        if (dirty != 0 && dirty != 1) {
+                            return fail("invalid build_dirty scalar");
+                        }
+                        parsed_report.status = static_cast<RunStatus>(status);
+                        parsed_report.total_effective_iterations = total;
+                        parsed_report.build.dirty = (dirty != 0);
+                        parsed_report.build.scalar_type =
+                            (precision == 0) ? "double" : "float";
+                        if (!get_str_attr(fid, "revision",
+                                          parsed_report.build.revision) ||
+                            !get_str_attr(fid, "build_type",
+                                          parsed_report.build.build_type) ||
+                            !get_str_attr(
+                                fid, "precision_policy",
+                                parsed_report.build.precision_policy) ||
+                            !get_str_attr(fid, "compile_flags",
+                                          parsed_report.build.compile_flags) ||
+                            !get_str_attr(fid, "source_path",
+                                          parsed_report.input.source_path) ||
+                            !get_str_attr(fid, "source_hash",
+                                          parsed_report.input.source_hash) ||
+                            !get_str_attr(fid, "gpu_name",
+                                          parsed_report.runtime.gpu_name) ||
+                            !get_str_attr(fid, "driver",
+                                          parsed_report.runtime.driver) ||
+                            !get_str_attr(fid, "runtime",
+                                          parsed_report.runtime.runtime) ||
+                            !get_str_attr(fid, "toolkit",
+                                          parsed_report.runtime.toolkit)) {
+                            return fail("missing provenance attributes");
+                        }
+                        hsize_t d_stages[1] = {0};
+                        if (!get_dim_exact("stage_ns", 1, d_stages)) {
+                            return fail("missing/malformed stage_ns");
+                        }
+                        const size_t nstages = (size_t)d_stages[0];
+                        // restart_iteration is OPTIONAL only in the sense of
+                        // being absent: when the dataset exists it must be rank
+                        // 1 (a rank-0 or rank-2 dataset is malformed and must
+                        // fail, not be skipped).
+                        hsize_t d_restarts[1] = {0};
+                        size_t nrestarts = 0;
                         {
-                            H5Closer lfreeb_attr(
-                                H5Aopen(fid, "lfreeb", H5P_DEFAULT));
-                            if (lfreeb_attr.get() >= 0) {
-                                int lfreeb = 0;
-                                if (!get_int_attr("lfreeb", lfreeb)) {
+                            H5Closer probe(H5Dopen2(fid, "restart_iteration",
+                                                    H5P_DEFAULT));
+                            if (probe.get() >= 0 &&
+                                !get_dim_exact("restart_iteration", 1,
+                                               d_restarts)) {
+                                return fail(
+                                    "malformed restart_iteration dataset");
+                            }
+                            if (probe.get() >= 0)
+                                nrestarts = (size_t)d_restarts[0];
+                        }
+                        // Documented stage/restart resource caps (handoff §4).
+                        if (nstages > equilibrium::io_detail::MAX_STAGE_COUNT ||
+                            nrestarts >
+                                equilibrium::io_detail::MAX_STAGE_COUNT) {
+                            return fail(
+                                "stage/restart dimensions exceed the resource "
+                                "cap");
+                        }
+                        std::vector<int> stage_ns, stage_iter, stage_conv,
+                            rst_off;
+                        std::vector<double> st_fsqr, st_fsqz, st_fsql;
+                        std::vector<int> rst_iter;
+                        if (!get_int_arr("stage_ns", stage_ns, nstages) ||
+                            !get_int_arr("stage_iterations", stage_iter,
+                                         nstages) ||
+                            !get_int_arr("stage_converged", stage_conv,
+                                         nstages) ||
+                            !get_int_arr("restart_stage_offset", rst_off,
+                                         nstages) ||
+                            !get_dbl_arr("stage_fsqr", st_fsqr, nstages) ||
+                            !get_dbl_arr("stage_fsqz", st_fsqz, nstages) ||
+                            !get_dbl_arr("stage_fsql", st_fsql, nstages) ||
+                            (nrestarts > 0 &&
+                             !get_int_arr("restart_iteration", rst_iter,
+                                          nrestarts))) {
+                            return fail("stage history read failed");
+                        }
+                        // Validate the offsets BEFORE they index rst_iter
+                        // (completion-plan follow-up §2.2): negative,
+                        // descending, oversized, or non-zero first offsets must
+                        // fail cleanly instead of reading out of bounds.
+                        {
+                            const std::string off_err =
+                                validate_restart_offsets(rst_off, nstages,
+                                                         nrestarts);
+                            if (!off_err.empty()) {
+                                return fail("invalid restart offsets: " +
+                                            off_err);
+                            }
+                        }
+                        for (size_t g = 0; g < nstages; ++g) {
+                            if (stage_ns[g] <= 0) {
+                                return fail("nonpositive stage surface count");
+                            }
+                            if (stage_iter[g] < 0) {
+                                return fail("negative stage iteration count");
+                            }
+                            if (stage_conv[g] != 0 && stage_conv[g] != 1) {
+                                return fail("invalid stage_converged value");
+                            }
+                        }
+                        for (int iteration : rst_iter) {
+                            if (iteration < 0) {
+                                return fail("negative restart iteration");
+                            }
+                        }
+                        for (size_t g = 0; g < nstages; ++g) {
+                            StageReport st;
+                            st.ns = stage_ns[g];
+                            st.effective_iterations = stage_iter[g];
+                            st.converged = (stage_conv[g] != 0);
+                            st.final_residual.fsqr = st_fsqr[g];
+                            st.final_residual.fsqz = st_fsqz[g];
+                            st.final_residual.fsql = st_fsql[g];
+                            const size_t begin = (size_t)rst_off[g];
+                            const size_t end = (g + 1 < nstages)
+                                                   ? (size_t)rst_off[g + 1]
+                                                   : nrestarts;
+                            for (size_t k = begin; k < end; ++k) {
+                                st.restarts.push_back(
+                                    RestartEvent{rst_iter[k]});
+                            }
+                            parsed_report.stages.push_back(std::move(st));
+                        }
+
+                        return {};
+                    });
+                if (selected) {
+                    decode_group(
+                        DataGroup::GRID,
+                        [&] { return has_metadata(io_detail::GRID_MEMBERS); },
+                        [&]() -> Status {
+                            GridMetadata grid;
+                            if (!get_int_attr("mpol", grid.mpol) ||
+                                !get_int_attr("ntor", grid.ntor) ||
+                                !get_int_attr("nfp", grid.nfp) ||
+                                !get_int_attr("ntheta", grid.ntheta) ||
+                                !get_int_attr("nzeta", grid.nzeta))
+                                return Status(
+                                    "missing or malformed grid metadata");
+                            selected->grid = grid;
+                            return {};
+                        });
+                }
+                decode_group(
+                    DataGroup::INPUT,
+                    [&] { return has_metadata(io_detail::INPUT_MEMBERS); },
+                    [&]() -> Status {
+                        auto fail = group_fail;
+                        int input_lasym = !selected && snapshot.lasym() ? 1 : 0;
+                        if (selected) {
+                            const bool present = H5Aexists(fid, "lasym") > 0;
+                            if (present &&
+                                (!get_int_attr("lasym", input_lasym) ||
+                                 (input_lasym != 0 && input_lasym != 1)))
+                                return Status(
+                                    "invalid saved input symmetry tag");
+                        }
+
+                        // ---- embedded normalized-input record ----
+                        // All-or-nothing: when the mpol attribute exists the
+                        // full record is required (pre-record containers keep
+                        // the default-empty InputParams); every read gets the
+                        // exact-rank/type/extent hardening above.
+                        {
+                            H5Closer aid(H5Aopen(fid, "mpol", H5P_DEFAULT));
+                            if (aid.get() >= 0) {
+                                InputParams ip;
+                                if (!get_int_attr("mpol", ip.mpol) ||
+                                    !get_int_attr("ntor", ip.ntor) ||
+                                    !get_int_attr("nfp", ip.nfp) ||
+                                    !get_int_attr("ntheta", ip.ntheta) ||
+                                    !get_int_attr("nzeta", ip.nzeta) ||
+                                    !get_int_attr("ncurr", ip.ncurr) ||
+                                    !get_dbl_attr("delt", ip.delt) ||
+                                    !get_dbl_attr("phiedge", ip.phiedge) ||
+                                    !get_dbl_attr("pres_scale",
+                                                  ip.pres_scale) ||
+                                    !get_dbl_attr("adiabatic_index",
+                                                  ip.adiabatic_index) ||
+                                    !get_dbl_attr("spres_ped", ip.spres_ped) ||
+                                    !get_dbl_attr("bloat", ip.bloat) ||
+                                    !get_dbl_attr("curtor", ip.curtor) ||
+                                    !get_dbl_attr("tcon0", ip.tcon0)) {
                                     return fail(
                                         "malformed embedded input record");
                                 }
-                                ip.lfreeb = lfreeb != 0;
-                            }
-                            H5Closer nvacskip_attr(
-                                H5Aopen(fid, "nvacskip", H5P_DEFAULT));
-                            if (nvacskip_attr.get() >= 0 &&
-                                !get_int_attr("nvacskip", ip.nvacskip)) {
-                                return fail("malformed embedded input record");
-                            }
-                            get_str_attr(fid, "mgrid_file", ip.mgrid_file);
-                            get_str_attr(fid, "coils_file", ip.coils_file);
-                            get_str_attr(fid, "makegrid_parameters_file",
-                                         ip.makegrid_parameters_file);
-                            H5Closer present_attr(
-                                H5Aopen(fid, "makegrid_parameters_present",
-                                        H5P_DEFAULT));
-                            if (present_attr.get() >= 0) {
-                                int present = 0;
-                                if (!get_int_attr("makegrid_parameters_present",
-                                                  present)) {
-                                    return fail(
-                                        "malformed embedded input record");
-                                }
-                                if (present != 0) {
-                                    MakegridParametersSpec parameters;
-                                    int normalize = 0;
-                                    int symmetry = 0;
-                                    if (!get_int_attr(
-                                            "makegrid_normalize_by_currents",
-                                            normalize) ||
-                                        !get_int_attr(
-                                            "makegrid_assume_stellarator_"
-                                            "symmetry",
-                                            symmetry) ||
-                                        !get_int_attr(
-                                            "makegrid_number_of_field_periods",
-                                            parameters
-                                                .number_of_field_periods) ||
-                                        !get_dbl_attr(
-                                            "makegrid_r_grid_minimum",
-                                            parameters.r_grid_minimum) ||
-                                        !get_dbl_attr(
-                                            "makegrid_r_grid_maximum",
-                                            parameters.r_grid_maximum) ||
-                                        !get_int_attr(
-                                            "makegrid_number_of_r_grid_points",
-                                            parameters
-                                                .number_of_r_grid_points) ||
-                                        !get_dbl_attr(
-                                            "makegrid_z_grid_minimum",
-                                            parameters.z_grid_minimum) ||
-                                        !get_dbl_attr(
-                                            "makegrid_z_grid_maximum",
-                                            parameters.z_grid_maximum) ||
-                                        !get_int_attr(
-                                            "makegrid_number_of_z_grid_points",
-                                            parameters
-                                                .number_of_z_grid_points) ||
-                                        !get_int_attr(
-                                            "makegrid_number_of_phi_grid_"
-                                            "points",
-                                            parameters
-                                                .number_of_phi_grid_points)) {
+                                {
+                                    H5Closer lfreeb_attr(
+                                        H5Aopen(fid, "lfreeb", H5P_DEFAULT));
+                                    if (lfreeb_attr.get() >= 0) {
+                                        int lfreeb = 0;
+                                        if (!get_int_attr("lfreeb", lfreeb)) {
+                                            return fail(
+                                                "malformed embedded input "
+                                                "record");
+                                        }
+                                        ip.lfreeb = lfreeb != 0;
+                                    }
+                                    H5Closer nvacskip_attr(
+                                        H5Aopen(fid, "nvacskip", H5P_DEFAULT));
+                                    if (nvacskip_attr.get() >= 0 &&
+                                        !get_int_attr("nvacskip",
+                                                      ip.nvacskip)) {
                                         return fail(
                                             "malformed embedded input record");
                                     }
-                                    parameters.normalize_by_currents =
-                                        normalize != 0;
-                                    parameters.assume_stellarator_symmetry =
-                                        symmetry != 0;
-                                    ip.embedded_makegrid_parameters =
-                                        parameters;
+                                    get_str_attr(fid, "mgrid_file",
+                                                 ip.mgrid_file);
+                                    get_str_attr(fid, "coils_file",
+                                                 ip.coils_file);
+                                    get_str_attr(fid,
+                                                 "makegrid_parameters_file",
+                                                 ip.makegrid_parameters_file);
+                                    H5Closer present_attr(H5Aopen(
+                                        fid, "makegrid_parameters_present",
+                                        H5P_DEFAULT));
+                                    if (present_attr.get() >= 0) {
+                                        int present = 0;
+                                        if (!get_int_attr(
+                                                "makegrid_parameters_present",
+                                                present)) {
+                                            return fail(
+                                                "malformed embedded input "
+                                                "record");
+                                        }
+                                        if (present != 0) {
+                                            MakegridParametersSpec parameters;
+                                            int normalize = 0;
+                                            int symmetry = 0;
+                                            if (!get_int_attr(
+                                                    "makegrid_normalize_by_"
+                                                    "currents",
+                                                    normalize) ||
+                                                !get_int_attr("makegrid_assume_"
+                                                              "stellarator_"
+                                                              "symmetry",
+                                                              symmetry) ||
+                                                !get_int_attr(
+                                                    "makegrid_number_of_field_"
+                                                    "periods",
+                                                    parameters
+                                                        .number_of_field_periods) ||
+                                                !get_dbl_attr(
+                                                    "makegrid_r_grid_minimum",
+                                                    parameters
+                                                        .r_grid_minimum) ||
+                                                !get_dbl_attr(
+                                                    "makegrid_r_grid_maximum",
+                                                    parameters
+                                                        .r_grid_maximum) ||
+                                                !get_int_attr(
+                                                    "makegrid_number_of_r_grid_"
+                                                    "points",
+                                                    parameters
+                                                        .number_of_r_grid_points) ||
+                                                !get_dbl_attr(
+                                                    "makegrid_z_grid_minimum",
+                                                    parameters
+                                                        .z_grid_minimum) ||
+                                                !get_dbl_attr(
+                                                    "makegrid_z_grid_maximum",
+                                                    parameters
+                                                        .z_grid_maximum) ||
+                                                !get_int_attr(
+                                                    "makegrid_number_of_z_grid_"
+                                                    "points",
+                                                    parameters
+                                                        .number_of_z_grid_points) ||
+                                                !get_int_attr(
+                                                    "makegrid_number_of_phi_"
+                                                    "grid_"
+                                                    "points",
+                                                    parameters
+                                                        .number_of_phi_grid_points)) {
+                                                return fail(
+                                                    "malformed embedded input "
+                                                    "record");
+                                            }
+                                            parameters.normalize_by_currents =
+                                                normalize != 0;
+                                            parameters
+                                                .assume_stellarator_symmetry =
+                                                symmetry != 0;
+                                            ip.embedded_makegrid_parameters =
+                                                parameters;
+                                        }
+                                    }
                                 }
+                                {
+                                    auto get_vec =
+                                        [&](const char* name,
+                                            std::vector<double>& out) -> bool {
+                                        hsize_t dims[1] = {0};
+                                        if (!get_dim_exact(name, 1, dims))
+                                            return false;
+                                        return get_dbl_arr(name, out,
+                                                           (size_t)dims[0]);
+                                    };
+                                    if (!get_vec("am", ip.am) ||
+                                        !get_vec("ac", ip.ac) ||
+                                        !get_vec("ai", ip.ai) ||
+                                        !get_vec("aphi", ip.aphi) ||
+                                        !get_vec("raxis_c", ip.raxis_c) ||
+                                        !get_vec("zaxis_s", ip.zaxis_s)) {
+                                        return fail(
+                                            "malformed embedded input record");
+                                    }
+                                    if (H5Lexists(fid, "extcur", H5P_DEFAULT) >
+                                            0 &&
+                                        !get_vec("extcur", ip.extcur)) {
+                                        return fail(
+                                            "malformed embedded input record");
+                                    }
+                                }
+                                {
+                                    hsize_t d_in[1] = {0};
+                                    if (!get_dim_exact("stage_in_ns", 1,
+                                                       d_in)) {
+                                        return fail(
+                                            "malformed embedded input record");
+                                    }
+                                    const size_t nstages_in = (size_t)d_in[0];
+                                    if (nstages_in > equilibrium::io_detail::
+                                                         MAX_STAGE_COUNT) {
+                                        return fail(
+                                            "embedded input stage count "
+                                            "exceeds "
+                                            "the resource cap");
+                                    }
+                                    std::vector<int> stg_in_ns, stg_max_iter;
+                                    std::vector<double> stg_ftol;
+                                    if (!get_int_arr("stage_in_ns", stg_in_ns,
+                                                     nstages_in) ||
+                                        !get_int_arr("stage_max_iter",
+                                                     stg_max_iter,
+                                                     nstages_in) ||
+                                        !get_dbl_arr("stage_ftol", stg_ftol,
+                                                     nstages_in)) {
+                                        return fail(
+                                            "malformed embedded input record");
+                                    }
+                                    for (size_t g = 0; g < nstages_in; ++g) {
+                                        InputStage st;
+                                        st.ns = stg_in_ns[g];
+                                        st.max_iter = stg_max_iter[g];
+                                        st.ftol = stg_ftol[g];
+                                        ip.stages.push_back(st);
+                                    }
+                                }
+                                {
+                                    hsize_t d_r[1] = {0}, d_z[1] = {0},
+                                            d_b[2] = {0, 0};
+                                    if (!get_dim_exact("rbc_m", 1, d_r) ||
+                                        !get_dim_exact("zbs_m", 1, d_z) ||
+                                        !get_dim_exact("rbcc", 2, d_b)) {
+                                        return fail(
+                                            "malformed embedded input record");
+                                    }
+                                    const size_t nrbc = (size_t)d_r[0],
+                                                 nzbs = (size_t)d_z[0];
+                                    if (!get_int_arr("rbc_m", ip.rbc_m, nrbc) ||
+                                        !get_int_arr("rbc_n", ip.rbc_n, nrbc) ||
+                                        !get_dbl_arr("rbc_value", ip.rbc_value,
+                                                     nrbc) ||
+                                        !get_int_arr("zbs_m", ip.zbs_m, nzbs) ||
+                                        !get_int_arr("zbs_n", ip.zbs_n, nzbs) ||
+                                        !get_dbl_arr("zbs_value", ip.zbs_value,
+                                                     nzbs) ||
+                                        !get_dbl_mat("rbcc", ip.rbcc,
+                                                     (size_t)d_b[0],
+                                                     (size_t)d_b[1]) ||
+                                        !get_dbl_mat("rbss", ip.rbss,
+                                                     (size_t)d_b[0],
+                                                     (size_t)d_b[1]) ||
+                                        !get_dbl_mat("zbsc", ip.zbsc,
+                                                     (size_t)d_b[0],
+                                                     (size_t)d_b[1]) ||
+                                        !get_dbl_mat("zbcs", ip.zbcs,
+                                                     (size_t)d_b[0],
+                                                     (size_t)d_b[1])) {
+                                        return fail(
+                                            "malformed embedded input record");
+                                    }
+                                }
+                                // The schema/profile-type tags are
+                                // informational; an absent or unreadable one
+                                // keeps the default (an older container lacks
+                                // the profile types -> "power_series").
+                                std::string schema_tag;
+                                if (get_str_attr(fid, "schema", schema_tag)) {
+                                    ip.schema = schema_tag;
+                                }
+                                std::string pmass_tag, piota_tag, pcurr_tag;
+                                if (get_str_attr(fid, "pmass_type",
+                                                 pmass_tag)) {
+                                    ip.pmass_type = pmass_tag;
+                                }
+                                if (get_str_attr(fid, "piota_type",
+                                                 piota_tag)) {
+                                    ip.piota_type = piota_tag;
+                                }
+                                if (get_str_attr(fid, "pcurr_type",
+                                                 pcurr_tag)) {
+                                    ip.pcurr_type = pcurr_tag;
+                                }
+                                std::string pflux_tag;
+                                if (get_str_attr(fid, "pflux_type", pflux_tag))
+                                    ip.pflux_type = pflux_tag;
+                                parsed_report.input_params = std::move(ip);
                             }
                         }
-                        {
-                            auto get_vec =
-                                [&](const char* name,
-                                    std::vector<double>& out) -> bool {
-                                hsize_t dims[1] = {0};
-                                if (!get_dim_exact(name, 1, dims)) return false;
-                                return get_dbl_arr(name, out, (size_t)dims[0]);
-                            };
-                            if (!get_vec("am", ip.am) ||
-                                !get_vec("ac", ip.ac) ||
-                                !get_vec("ai", ip.ai) ||
-                                !get_vec("aphi", ip.aphi) ||
-                                !get_vec("raxis_c", ip.raxis_c) ||
-                                !get_vec("zaxis_s", ip.zaxis_s)) {
-                                return fail("malformed embedded input record");
-                            }
-                            if (H5Lexists(fid, "extcur", H5P_DEFAULT) > 0 &&
-                                !get_vec("extcur", ip.extcur)) {
-                                return fail("malformed embedded input record");
-                            }
-                        }
-                        {
-                            hsize_t d_in[1] = {0};
-                            if (!get_dim_exact("stage_in_ns", 1, d_in)) {
-                                return fail("malformed embedded input record");
-                            }
-                            const size_t nstages_in = (size_t)d_in[0];
-                            if (nstages_in >
-                                equilibrium::io_detail::MAX_STAGE_COUNT) {
+                        if (input_lasym == 1) {
+                            auto& ip = parsed_report.input_params;
+                            int lasym = 0;
+                            if (!get_int_attr("lasym", lasym) || lasym != 1 ||
+                                ip.mpol < 1 || ip.ntor < 0) {
                                 return fail(
-                                    "embedded input stage count exceeds "
-                                    "the resource cap");
+                                    "missing typed asymmetric input record");
                             }
-                            std::vector<int> stg_in_ns, stg_max_iter;
-                            std::vector<double> stg_ftol;
-                            if (!get_int_arr("stage_in_ns", stg_in_ns,
-                                             nstages_in) ||
-                                !get_int_arr("stage_max_iter", stg_max_iter,
-                                             nstages_in) ||
-                                !get_dbl_arr("stage_ftol", stg_ftol,
-                                             nstages_in)) {
-                                return fail("malformed embedded input record");
-                            }
-                            for (size_t g = 0; g < nstages_in; ++g) {
-                                InputStage st;
-                                st.ns = stg_in_ns[g];
-                                st.max_iter = stg_max_iter[g];
-                                st.ftol = stg_ftol[g];
-                                ip.stages.push_back(st);
-                            }
-                        }
-                        {
-                            hsize_t d_r[1] = {0}, d_z[1] = {0}, d_b[2] = {0, 0};
-                            if (!get_dim_exact("rbc_m", 1, d_r) ||
-                                !get_dim_exact("zbs_m", 1, d_z) ||
-                                !get_dim_exact("rbcc", 2, d_b)) {
-                                return fail("malformed embedded input record");
-                            }
-                            const size_t nrbc = (size_t)d_r[0],
-                                         nzbs = (size_t)d_z[0];
-                            if (!get_int_arr("rbc_m", ip.rbc_m, nrbc) ||
-                                !get_int_arr("rbc_n", ip.rbc_n, nrbc) ||
-                                !get_dbl_arr("rbc_value", ip.rbc_value, nrbc) ||
-                                !get_int_arr("zbs_m", ip.zbs_m, nzbs) ||
-                                !get_int_arr("zbs_n", ip.zbs_n, nzbs) ||
-                                !get_dbl_arr("zbs_value", ip.zbs_value, nzbs) ||
-                                !get_dbl_mat("rbcc", ip.rbcc, (size_t)d_b[0],
-                                             (size_t)d_b[1]) ||
-                                !get_dbl_mat("rbss", ip.rbss, (size_t)d_b[0],
-                                             (size_t)d_b[1]) ||
-                                !get_dbl_mat("zbsc", ip.zbsc, (size_t)d_b[0],
-                                             (size_t)d_b[1]) ||
-                                !get_dbl_mat("zbcs", ip.zbcs, (size_t)d_b[0],
-                                             (size_t)d_b[1])) {
-                                return fail("malformed embedded input record");
+                            ip.lasym = true;
+                            const size_t axis =
+                                static_cast<size_t>(ip.ntor) + 1;
+                            const auto modes =
+                                checked_mul((size_t)ip.mpol, axis);
+                            hsize_t d_r[1] = {0}, d_z[1] = {0};
+                            if (!modes ||
+                                *modes > io_detail::MAX_INPUT_PARAMS_VECTOR ||
+                                !get_dim_exact("rbs_m", 1, d_r) ||
+                                !get_dim_exact("zbc_m", 1, d_z) ||
+                                d_r[0] > io_detail::MAX_INPUT_PARAMS_VECTOR ||
+                                d_z[0] > io_detail::MAX_INPUT_PARAMS_VECTOR ||
+                                !get_dbl_arr("raxis_s", ip.raxis_s, axis) ||
+                                !get_dbl_arr("zaxis_c", ip.zaxis_c, axis) ||
+                                !get_int_arr("rbs_m", ip.rbs_m, d_r[0]) ||
+                                !get_int_arr("rbs_n", ip.rbs_n, d_r[0]) ||
+                                !get_dbl_arr("rbs_value", ip.rbs_value,
+                                             d_r[0]) ||
+                                !get_int_arr("zbc_m", ip.zbc_m, d_z[0]) ||
+                                !get_int_arr("zbc_n", ip.zbc_n, d_z[0]) ||
+                                !get_dbl_arr("zbc_value", ip.zbc_value,
+                                             d_z[0]) ||
+                                !get_dbl_mat("rbsc", ip.rbsc, ip.mpol, axis) ||
+                                !get_dbl_mat("rbcs", ip.rbcs, ip.mpol, axis) ||
+                                !get_dbl_mat("zbcc", ip.zbcc, ip.mpol, axis) ||
+                                !get_dbl_mat("zbss", ip.zbss, ip.mpol, axis)) {
+                                return fail(
+                                    "malformed asymmetric input record");
                             }
                         }
-                        // The schema/profile-type tags are informational; an
-                        // absent or unreadable one keeps the default (an
-                        // older container lacks the profile types ->
-                        // "power_series").
-                        std::string schema_tag;
-                        if (get_str_attr(fid, "schema", schema_tag)) {
-                            ip.schema = schema_tag;
-                        }
-                        std::string pmass_tag, piota_tag, pcurr_tag;
-                        if (get_str_attr(fid, "pmass_type", pmass_tag)) {
-                            ip.pmass_type = pmass_tag;
-                        }
-                        if (get_str_attr(fid, "piota_type", piota_tag)) {
-                            ip.piota_type = piota_tag;
-                        }
-                        if (get_str_attr(fid, "pcurr_type", pcurr_tag)) {
-                            ip.pcurr_type = pcurr_tag;
-                        }
-                        std::string pflux_tag;
-                        if (get_str_attr(fid, "pflux_type", pflux_tag))
-                            ip.pflux_type = pflux_tag;
-                        parsed_report.input_params = std::move(ip);
-                    }
-                }
-                if (snapshot.lasym()) {
-                    auto& ip = parsed_report.input_params;
-                    int lasym = 0;
-                    if (!get_int_attr("lasym", lasym) || lasym != 1 ||
-                        ip.mpol < 1 || ip.ntor < 0) {
-                        return fail("missing typed asymmetric input record");
-                    }
-                    ip.lasym = true;
-                    const size_t axis = static_cast<size_t>(ip.ntor) + 1;
-                    const auto modes = checked_mul((size_t)ip.mpol, axis);
-                    hsize_t d_r[1] = {0}, d_z[1] = {0};
-                    if (!modes || *modes > io_detail::MAX_INPUT_PARAMS_VECTOR ||
-                        !get_dim_exact("rbs_m", 1, d_r) ||
-                        !get_dim_exact("zbc_m", 1, d_z) ||
-                        d_r[0] > io_detail::MAX_INPUT_PARAMS_VECTOR ||
-                        d_z[0] > io_detail::MAX_INPUT_PARAMS_VECTOR ||
-                        !get_dbl_arr("raxis_s", ip.raxis_s, axis) ||
-                        !get_dbl_arr("zaxis_c", ip.zaxis_c, axis) ||
-                        !get_int_arr("rbs_m", ip.rbs_m, d_r[0]) ||
-                        !get_int_arr("rbs_n", ip.rbs_n, d_r[0]) ||
-                        !get_dbl_arr("rbs_value", ip.rbs_value, d_r[0]) ||
-                        !get_int_arr("zbc_m", ip.zbc_m, d_z[0]) ||
-                        !get_int_arr("zbc_n", ip.zbc_n, d_z[0]) ||
-                        !get_dbl_arr("zbc_value", ip.zbc_value, d_z[0]) ||
-                        !get_dbl_mat("rbsc", ip.rbsc, ip.mpol, axis) ||
-                        !get_dbl_mat("rbcs", ip.rbcs, ip.mpol, axis) ||
-                        !get_dbl_mat("zbcc", ip.zbcc, ip.mpol, axis) ||
-                        !get_dbl_mat("zbss", ip.zbss, ip.mpol, axis)) {
-                        return fail("malformed asymmetric input record");
-                    }
-                }
+
+                        return {};
+                    });
                 report->get() = std::move(parsed_report);
             }
             H5Fclose(fid);
@@ -1234,6 +1443,10 @@ class Hdf5V1Reader final : public Reader {
             H5Fclose(fid);
             return Result<EquilibriumSnapshot>(
                 "HDF5: allocation failed (dimensions implausible or corrupt)");
+        } catch (const std::runtime_error& error) {
+            H5Fclose(fid);
+            return Result<EquilibriumSnapshot>("HDF5: " +
+                                               std::string(error.what()));
         }
     }
 };

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Add required, optional and ignored group requests for native binary,
+  checkpoint, NetCDF, HDF5 and Boozer binary reads, with per-group diagnostics
+  and instance capability queries. Existing no-options reads remain strict.
+- Retain original real Boozer coefficients with runtime REAL/COMPLEX/BOTH
+  selection. REAL reads avoid complex arrays; writers prefer retained real
+  values. Optional profiles no longer constrain independent selected groups.
+- Handle native binary scalar and array byte order inside the codecs.
+- Expose binary kind detection for consumers without file-version gates.
+- Extend public data records and the Reader interface; C++ consumers must
+  rebuild against these headers.
+
 - Require HDF5 1.14.6 or newer, including supplied codec targets and installed
   consumers. Native `AUTO` builds skip older HDF5 libraries.
 - Build HDF5 output in memory before publishing it, so storage-write failures

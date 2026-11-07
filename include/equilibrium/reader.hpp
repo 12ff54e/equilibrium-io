@@ -2,6 +2,7 @@
 #ifndef EQUILIBRIUM_INCLUDE_IO_READER_HPP_
 #define EQUILIBRIUM_INCLUDE_IO_READER_HPP_
 
+#include "equilibrium/equilibrium.hpp"
 #include "equilibrium/equilibrium_snapshot.hpp"
 #include "equilibrium/output_spec.hpp"
 #include "equilibrium/result.hpp"
@@ -23,6 +24,9 @@ class Reader {
         const std::string& path,
         std::optional<std::reference_wrapper<RunReport>> report =
             std::nullopt) = 0;
+    virtual Result<Equilibrium> read(const std::string&, const ReadRequest&) {
+        return Result<Equilibrium>("reader does not support group requests");
+    }
 };
 
 // Full codec dispatch, linked through equilibrium::io. An unavailable codec

@@ -20,10 +20,12 @@
 
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <numbers>
 #include <span>
@@ -1003,10 +1005,184 @@ void test_publication_and_conversion() {
     std::filesystem::remove(input);
 }
 
+void test_selected_reads() {
+    using namespace equilibrium;
+    using G = DataGroup;
+    using R = Requirement;
+    using A = Availability;
+    const auto path = std::filesystem::current_path() / "selected-boozer.bin";
+    const auto saved_bytes = [&]() {
+        std::ifstream input(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    const auto put_bytes = [&](const std::string& bytes) {
+        std::ofstream(path, std::ios::binary).write(bytes.data(), bytes.size());
+    };
+    const auto fails = [&](const BoozerReadOptions& options) {
+        try {
+            (void)read_boozer_binary(path, options);
+        } catch (const std::exception&) { return true; }
+        return false;
+    };
+    for (bool asymmetric : {false, true}) {
+        auto original = asymmetric ? make_asymmetric_result() : make_result();
+        original = with_tracing(std::move(original));
+        with_magnetic(original);
+        with_profiles(original);
+        original.tracing->pflux_type = "list";
+        original.tracing->aphi = {1, 2, 1};
+        write_boozer_binary(path, original, "selected-source");
+        const auto encoded = saved_bytes();
+        BoozerReadOptions options;
+        options.spectrum = SpectrumStorage::REAL;
+        auto real = read_boozer_binary(path, options);
+        expect(real.result.has_real_spectrum() &&
+                   !real.result.has_complex_spectrum(),
+               "REAL materialized complex arrays");
+        options.spectrum = SpectrumStorage::BOTH;
+        auto both = read_boozer_binary(path, options);
+        expect(both.result.has_real_spectrum() &&
+                   both.result.has_complex_spectrum(),
+               "BOTH omitted a representation");
+        const auto& a = *real.result.real_spectrum;
+        const auto& b = *both.result.real_spectrum;
+        expect(a.rmncc == b.rmncc && a.rmnss == b.rmnss && a.zmnsc == b.zmnsc &&
+                   a.zmncs == b.zmncs && a.numnsc == b.numnsc &&
+                   a.numncs == b.numncs && a.rmnsc == b.rmnsc &&
+                   a.rmncs == b.rmncs && a.zmncc == b.zmncc &&
+                   a.zmnss == b.zmnss && a.numncc == b.numncc &&
+                   a.numnss == b.numnss,
+               "BOTH changed original real coefficients");
+        options.spectrum = SpectrumStorage::COMPLEX;
+        auto complex = read_boozer_binary(path, options);
+        expect(!complex.result.has_real_spectrum() &&
+                   complex.result.spectrum.r == both.result.spectrum.r &&
+                   complex.result.spectrum.z == both.result.spectrum.z &&
+                   complex.result.spectrum.nu == both.result.spectrum.nu,
+               "complex storage modes disagree");
+        for (std::size_t i = 0; i < original.spectrum.r.size(); ++i)
+            expect(std::abs(complex.result.spectrum.r[i] -
+                            original.spectrum.r[i]) < 1e-12 &&
+                       std::abs(complex.result.spectrum.z[i] -
+                                original.spectrum.z[i]) < 1e-12 &&
+                       std::abs(complex.result.spectrum.nu[i] -
+                                original.spectrum.nu[i]) < 1e-12,
+                   "representation changed the physical Fourier polynomial");
+        write_boozer_binary(path, real.result, real.source_path);
+        expect(saved_bytes() == encoded,
+               "REAL rewrite changed original coefficients");
+        auto inactive = real.result;
+        auto& raw = *inactive.real_spectrum;
+        const std::array families{&raw.rmncc, &raw.rmnss,  &raw.zmnsc,
+                                  &raw.zmncs, &raw.numnsc, &raw.numncs,
+                                  &raw.rmnsc, &raw.rmncs,  &raw.zmncc,
+                                  &raw.zmnss, &raw.numncc, &raw.numnss};
+        for (std::size_t f = 0; f < (asymmetric ? 12u : 6u); ++f) {
+            const bool sine_m =
+                f == 1 || f == 2 || f == 4 || f == 6 || f == 9 || f == 11;
+            const bool sine_n =
+                f == 1 || f == 3 || f == 5 || f == 7 || f == 9 || f == 11;
+            for (std::size_t i = 0; i < families[f]->size(); ++i) {
+                const auto mode = i % raw.m.size();
+                if ((sine_m && raw.m[mode] == 0) ||
+                    (sine_n && raw.n[mode] == 0))
+                    (*families[f])[i] = 123 + f + i;
+            }
+        }
+        write_boozer_binary(path, inactive, real.source_path);
+        options.spectrum = SpectrumStorage::BOTH;
+        auto masked = read_boozer_binary(path, options);
+        expect(masked.result.real_spectrum->rmnss == raw.rmnss &&
+                   masked.result.spectrum.r == complex.result.spectrum.r &&
+                   masked.result.spectrum.z == complex.result.spectrum.z &&
+                   masked.result.spectrum.nu == complex.result.spectrum.nu,
+               "inactive sine terms changed physical geometry across "
+               "representations");
+        options.spectrum = SpectrumStorage::COMPLEX;
+
+        // V8's flux kind follows the optional profile arrays.
+        auto invalid = encoded;
+        const auto profile_offset =
+            encoded.size() - 8 - 3 * original.s.size() * 8;
+        for (int j = 0; j < 8; ++j)
+            invalid[profile_offset + j] =
+                static_cast<char>(UINT64_C(0x7ff8000000000000) >> (8 * j));
+        put_bytes(invalid);
+        options.groups[G::TRACING] = R::REQUIRED;
+        options.groups[G::MAGNETIC] = R::REQUIRED;
+        auto loaded = read_boozer_binary(path, options);
+        expect(
+            !loaded.result.has_profiles() && loaded.result.has_tracing() &&
+                loaded.result.tracing->pflux_type == "list" &&
+                loaded.result.read_diagnostics[G::PROFILES].availability ==
+                    A::INVALID &&
+                !loaded.result.read_diagnostics[G::PROFILES].diagnostic.empty(),
+            "invalid optional profiles affected required tracing");
+        options.groups[G::PROFILES] = R::REQUIRED;
+        expect(fails(options), "invalid required profiles accepted");
+        options.groups[G::PROFILES] = R::IGNORED;
+        loaded = read_boozer_binary(path, options);
+        expect(!loaded.result.has_profiles() &&
+                   loaded.result.read_diagnostics[G::PROFILES].availability ==
+                       A::NOT_REQUESTED &&
+                   loaded.result.tracing->pflux_type == "list",
+               "ignored profiles decoded");
+
+        // An invalid tracing group does not hide independent magnetic data.
+        invalid = encoded;
+        const std::string suffix = "not Boozer axis values";
+        const auto phiedge = invalid.find(suffix) + suffix.size() + 4;
+        invalid.replace(phiedge, 8, 8, '\0');
+        put_bytes(invalid);
+        options.groups[G::TRACING] = R::OPTIONAL;
+        loaded = read_boozer_binary(path, options);
+        expect(!loaded.result.has_tracing() && loaded.result.has_magnetic() &&
+                   loaded.result.magnetic_data()->get().fields ==
+                       original.tracing->magnetic->fields &&
+                   loaded.result.read_diagnostics[G::TRACING].availability ==
+                       A::INVALID,
+               "optional tracing corrupted independent magnetic group");
+        options.groups[G::TRACING] = R::IGNORED;
+        loaded = read_boozer_binary(path, options);
+        expect(!loaded.result.has_tracing() && loaded.result.has_magnetic(),
+               "ignored tracing was exposed");
+        options.groups[G::TRACING] = R::REQUIRED;
+        expect(fails(options), "invalid required tracing accepted");
+
+        put_bytes(encoded.substr(0, profile_offset + 1));
+        options.groups[G::PROFILES] = R::OPTIONAL;
+        expect(fails(options),
+               "truncated profiles hid required trailing flux kind");
+        options.groups[G::TRACING] = R::IGNORED;
+        loaded = read_boozer_binary(path, options);
+        expect(loaded.result.has_magnetic() && !loaded.result.has_profiles() &&
+                   loaded.result.read_diagnostics[G::PROFILES].availability ==
+                       A::INVALID,
+               "truncated optional last group rejected usable data");
+        put_bytes(encoded);
+        options.groups[G::GEOMETRY] = R::IGNORED;
+        loaded = read_boozer_binary(path, options);
+        expect(!loaded.result.has_geometry() && loaded.result.has_magnetic(),
+               "ignored geometry materialized");
+    }
+    auto legacy = make_result();
+    write_boozer_binary(path, legacy, "legacy");
+    BoozerReadOptions options;
+    auto loaded = read_boozer_binary(path, options);
+    expect(!loaded.result.has_profiles() &&
+               loaded.result.read_diagnostics[G::PROFILES].availability ==
+                   A::ABSENT,
+           "absent profiles reported incorrectly");
+    options.groups[G::MAGNETIC] = R::REQUIRED;
+    expect(fails(options), "missing required magnetic data accepted");
+    std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main() {
     try {
+        test_selected_reads();
         test_round_trip();
         test_flux_list_round_trip();
         for (bool magnetic_fields : {false, true}) {

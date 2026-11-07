@@ -45,9 +45,11 @@
 #include "equilibrium/reader.hpp"
 #include "equilibrium/writer.hpp"
 #include "io_common.hpp"
+#include "read_selection.hpp"
 
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -64,7 +66,6 @@ constexpr char MAGIC[9] = "CUMES001";
 // combines the profile and free-boundary extensions. Version 8 inserts the
 // scientific fields after the stable spectral state payload.
 constexpr std::int32_t VERSION = 11;
-constexpr std::int32_t MIN_READ_VERSION = 1;
 
 // The on-disk precision discriminator of the v1 trailer (0=double, 1=float).
 // Typed locally instead of a string compare against
@@ -162,179 +163,278 @@ class VersionedBinaryWriter final : public Writer {
     }
 };
 
+// Read framing even when provenance is ignored: saved grid/input data follow
+// it.
+bool read_provenance(FILE* fp,
+                     int version,
+                     RunReport& report,
+                     bool keep,
+                     std::string& reason) {
+    using namespace io_detail;
+    std::int32_t precision = 0, status = 0, total = 0, stages = 0;
+    if (!read_i32(fp, precision) || !read_i32(fp, status) ||
+        !read_i32(fp, total) || !read_i32(fp, stages) || stages < 0 ||
+        stages > MAX_INPUT_PARAMS_VECTOR)
+        return false;
+    if (keep && ((precision != 0 && precision != 1) || status < 0 ||
+                 status > 4 || total < 0))
+        reason = "invalid provenance tags";
+    report.status = static_cast<RunStatus>(status);
+    report.total_effective_iterations = total;
+    report.build.scalar_type = precision == 0 ? "double" : "float";
+    auto text = [&](std::string& value) {
+        return keep ? read_string(fp, value) : skip_string(fp);
+    };
+    std::uint8_t dirty = 0;
+    std::string legacy;
+    if (!text(report.build.revision) || !read_u8(fp, dirty) ||
+        !text(report.build.build_type) ||
+        (version >= 2 ? (!text(report.build.precision_policy) ||
+                         !text(report.build.compile_flags))
+                      : !text(legacy)) ||
+        !text(report.input.source_path) || !text(report.input.source_hash) ||
+        !text(report.runtime.gpu_name) || !text(report.runtime.driver) ||
+        !text(report.runtime.runtime) || !text(report.runtime.toolkit))
+        return false;
+    if (keep && dirty > 1) reason = "invalid provenance dirty flag";
+    report.build.dirty = dirty != 0;
+    for (int j = 0; j < stages; ++j) {
+        StageReport stage;
+        std::uint8_t converged = 0;
+        std::int32_t restarts = 0;
+        if (!read_i32(fp, stage.ns) ||
+            !read_i32(fp, stage.effective_iterations) ||
+            !read_u8(fp, converged) ||
+            !read_f64(fp, stage.final_residual.fsqr) ||
+            !read_f64(fp, stage.final_residual.fsqz) ||
+            !read_f64(fp, stage.final_residual.fsql) ||
+            !read_i32(fp, restarts) || restarts < 0 ||
+            restarts > MAX_INPUT_PARAMS_VECTOR)
+            return false;
+        if (keep &&
+            (stage.ns < 1 || stage.effective_iterations < 0 || converged > 1))
+            reason = "invalid provenance stage tags";
+        stage.converged = converged != 0;
+        for (int k = 0; k < restarts; ++k) {
+            std::int32_t iteration = 0;
+            if (!read_i32(fp, iteration)) return false;
+            if (keep) {
+                if (iteration < 0) reason = "negative restart iteration";
+                stage.restarts.push_back({iteration});
+            }
+        }
+        if (keep) report.stages.push_back(std::move(stage));
+    }
+    return true;
+}
+
 class VersionedBinaryReader final : public Reader {
    public:
     Result<EquilibriumSnapshot> read(
         const std::string& path,
         std::optional<std::reference_wrapper<RunReport>> report) override {
-        FILE* fp = fopen(path.c_str(), "rb");
-        if (!fp) return Result<EquilibriumSnapshot>("cannot open " + path);
-
-        auto fail =
-            [&](const std::string& reason) -> Result<EquilibriumSnapshot> {
-            fclose(fp);
-            return Result<EquilibriumSnapshot>(reason);
-        };
-
-        char magic[9] = {0};
-        std::int32_t version = 0, ns = 0, mnmax = 0;
-        if (!io_detail::read_bytes(fp, magic, 8) ||
-            !io_detail::read_i32(fp, version) || !io_detail::read_i32(fp, ns) ||
-            !io_detail::read_i32(fp, mnmax)) {
-            return fail("versioned binary: truncated header");
-        }
-        if (std::memcmp(magic, MAGIC, 8) != 0) {
-            return fail(
-                "versioned binary: bad magic (not a cumes v1 state file)");
-        }
-        if (version < MIN_READ_VERSION || version > VERSION) {
-            return fail("versioned binary: unsupported version " +
-                        std::to_string(version));
-        }
-        const bool has_policy_fields = (version >= 2);
-        const bool has_input_params = (version >= 3);
-        std::int32_t components = 6;
-        if (version >= 9 && !io_detail::read_i32(fp, components))
-            return fail("truncated spectral component count");
-        std::size_t n = 0;
-        std::string reason;
-        if (!io_detail::check_state_dimensions(fp, ns, mnmax, n, reason,
-                                               components)) {
-            return fail("versioned binary: " + reason);
-        }
-        EquilibriumSnapshot snapshot;
-        snapshot.source_version = version;
-        snapshot.ns = ns;
-        snapshot.mnmax = mnmax;
-        snapshot.families.resize(components);
-        if (!io_detail::read_state_families(fp, n, snapshot)) {
-            return fail("versioned binary: truncated state data");
-        }
-        if (version >= 8 &&
-            !io_detail::read_derived_fields(fp, snapshot, reason)) {
-            return fail("versioned binary: " + reason);
-        }
-        // Provenance trailer: parse into the optional RunReport (the schema-v1
-        // round-trip contract, completion plan step 2.3). A truncated trailer
-        // fails the read when the caller asked for the report.
+        auto decoded = io_detail::read_native_binary(
+            path, io_detail::legacy_request(report.has_value()), true);
+        if (!decoded) return Result<EquilibriumSnapshot>(decoded.error());
+        auto& owner = decoded.value();
+        if (owner.source.checkpoint)
+            return Result<EquilibriumSnapshot>(
+                "expected a result, got a checkpoint");
         if (report) {
-            RunReport parsed_report;
-            if (version == 9) {
-                return fail(
-                    "versioned binary: JSON-based asymmetric input "
-                    "record is no longer supported");
-            }
-            std::int32_t precision = 0, status = 0, total = 0, nstages = 0;
-            std::uint8_t dirty = 0;
-            if (!io_detail::read_i32(fp, precision) ||
-                !io_detail::read_i32(fp, status) ||
-                !io_detail::read_i32(fp, total) ||
-                !io_detail::read_i32(fp, nstages)) {
-                return fail("versioned binary: truncated provenance trailer");
-            }
-            if ((precision != 0 && precision != 1) || status < 0 ||
-                status > 4 || total < 0 || nstages < 0 ||
-                nstages > io_detail::MAX_INPUT_PARAMS_VECTOR)
-                return fail(
-                    "versioned binary: invalid provenance tags or counts");
-            parsed_report.status = static_cast<RunStatus>(status);
-            parsed_report.total_effective_iterations = total;
-            parsed_report.build.scalar_type =
-                (precision == 0) ? "double" : "float";
-            // The v2 trailer carries precision_policy + compile_flags after
-            // build_type; the historical v1 trailer carried a scalar_type
-            // string in that slot instead (the precision tag above is
-            // authoritative either way, so the v1 string is read and
-            // discarded).
-            std::string legacy_scalar_type;
-            if (!io_detail::read_string(fp, parsed_report.build.revision) ||
-                !io_detail::read_u8(fp, dirty) ||
-                !io_detail::read_string(fp, parsed_report.build.build_type) ||
-                (has_policy_fields
-                     ? (!io_detail::read_string(
-                            fp, parsed_report.build.precision_policy) ||
-                        !io_detail::read_string(
-                            fp, parsed_report.build.compile_flags))
-                     : !io_detail::read_string(fp, legacy_scalar_type)) ||
-                !io_detail::read_string(fp, parsed_report.input.source_path) ||
-                !io_detail::read_string(fp, parsed_report.input.source_hash) ||
-                !io_detail::read_string(fp, parsed_report.runtime.gpu_name) ||
-                !io_detail::read_string(fp, parsed_report.runtime.driver) ||
-                !io_detail::read_string(fp, parsed_report.runtime.runtime) ||
-                !io_detail::read_string(fp, parsed_report.runtime.toolkit)) {
-                return fail("versioned binary: truncated provenance trailer");
-            }
-            if (dirty > 1) return fail("versioned binary: invalid dirty flag");
-            parsed_report.build.dirty = (dirty != 0);
-            if (nstages < 0) return fail("versioned binary: bad stage count");
-            for (int g = 0; g < nstages; ++g) {
-                StageReport st;
-                std::int32_t ns = 0, iters = 0, nrestarts = 0;
-                std::uint8_t conv = 0;
-                if (!io_detail::read_i32(fp, ns) ||
-                    !io_detail::read_i32(fp, iters) ||
-                    !io_detail::read_u8(fp, conv) ||
-                    !io_detail::read_f64(fp, st.final_residual.fsqr) ||
-                    !io_detail::read_f64(fp, st.final_residual.fsqz) ||
-                    !io_detail::read_f64(fp, st.final_residual.fsql) ||
-                    !io_detail::read_i32(fp, nrestarts)) {
-                    return fail("versioned binary: truncated stage record");
-                }
-                if (ns < 1 || iters < 0 || conv > 1 || nrestarts < 0 ||
-                    nrestarts > io_detail::MAX_INPUT_PARAMS_VECTOR)
-                    return fail(
-                        "versioned binary: invalid stage tags or counts");
-                st.ns = ns;
-                st.effective_iterations = iters;
-                st.converged = (conv != 0);
-                if (nrestarts < 0) {
-                    return fail("versioned binary: bad restart count");
-                }
-                for (int k = 0; k < nrestarts; ++k) {
-                    RestartEvent ev;
-                    std::int32_t it = 0;
-                    if (!io_detail::read_i32(fp, it)) {
-                        return fail("versioned binary: truncated restart list");
-                    }
-                    if (it < 0)
-                        return fail(
-                            "versioned binary: negative restart iteration");
-                    ev.iteration = it;
-                    st.restarts.push_back(ev);
-                }
-                parsed_report.stages.push_back(std::move(st));
-            }
-            // The embedded normalized-input record: required for version 3,
-            // absent (default-empty) for versions 1 and 2. The three
-            // profile-type strings exist in version 4 records only.
-            if (has_input_params) {
-                std::string reason;
-                const bool has_profile_types = version == 4 || version >= 7;
-                const int free_boundary_extension = version >= 7   ? 3
-                                                    : version >= 5 ? version - 3
-                                                                   : 0;
-                if (!io_detail::read_input_params(
-                        fp, parsed_report.input_params, reason,
-                        has_profile_types, free_boundary_extension,
-                        version == 10 || (version >= 11 && snapshot.lasym()),
-                        version >= 11)) {
-                    return fail("versioned binary: " + reason);
-                }
-                if (parsed_report.input_params.lasym != snapshot.lasym()) {
-                    return fail(
-                        "versioned binary: state/input symmetry mismatch");
-                }
-            }
-            if (fgetc(fp) != EOF || ferror(fp))
-                return fail("versioned binary: trailing data or read error");
-            report->get() = std::move(parsed_report);
+            RunReport parsed;
+            if (owner.input) parsed.input_params = std::move(*owner.input);
+            if (owner.provenance)
+                static_cast<RunProvenance&>(parsed) =
+                    std::move(*owner.provenance);
+            report->get() = std::move(parsed);
         }
-        fclose(fp);
-        return snapshot;
+        return io_detail::take_snapshot(std::move(owner));
+    }
+    Result<Equilibrium> read(const std::string& path,
+                             const ReadRequest& request) override {
+        return io_detail::read_native_binary(path, request);
     }
 };
-
 }  // namespace
+
+namespace io_detail {
+
+Result<Equilibrium> read_native_binary(const std::string& path,
+                                       const ReadRequest& request,
+                                       bool strict) {
+    const auto close = [](FILE* fp) { fclose(fp); };
+    std::unique_ptr<FILE, decltype(close)> file(fopen(path.c_str(), "rb"),
+                                                close);
+    if (!file) return Result<Equilibrium>("cannot open " + path);
+    FILE* fp = file.get();
+    try {
+        ReadSelection selection(request, strict);
+        Equilibrium owner;
+        const auto finish = [&]() -> Result<Equilibrium> {
+            if (!strict) selection.reconcile(owner);
+            selection.finish();
+            owner.read_diagnostics = std::move(selection.diagnostics);
+            return std::move(owner);
+        };
+        const auto check = [&](DataGroup group, bool present) {
+            if (!selection.wants(group)) return false;
+            // Legacy Reader/checkpoint APIs return raw snapshots. Their owner
+            // adapters retain the stricter complete-record validation.
+            if (strict) return selection.accept(group, present);
+            auto status = validate_group(as_view(owner), group);
+            return selection.accept(group, present,
+                                    status ? "" : status.error());
+        };
+        char magic[8];
+        std::int32_t version = 0, precision = 0, ns = 0, modes = 0,
+                     components = 6;
+        if (!read_bytes(fp, magic, 8) || !read_i32(fp, version))
+            throw std::runtime_error("truncated binary header");
+        const bool checkpoint = std::memcmp(magic, "CUMECKP1", 8) == 0;
+        if (!checkpoint && std::memcmp(magic, MAGIC, 8) != 0)
+            throw std::runtime_error("unsupported native binary signature");
+        if (version < 1 || version > (checkpoint ? 9 : VERSION))
+            throw std::runtime_error("unsupported native binary version");
+        if ((checkpoint && (!read_i32(fp, precision) || precision != 0)) ||
+            !read_i32(fp, ns) || !read_i32(fp, modes) ||
+            (version >= (checkpoint ? 7 : 9) && !read_i32(fp, components)))
+            throw std::runtime_error("invalid native binary header");
+        std::size_t count = 0;
+        std::string reason;
+        if (!check_state_dimensions(fp, ns, modes, count, reason, components))
+            throw std::runtime_error(reason);
+        owner.ns = ns;
+        owner.mnmax = modes;
+        owner.source = {OutputFormat::BINARY, version, checkpoint};
+        if (selection.wants(DataGroup::GEOMETRY)) {
+            owner.families.resize(components);
+            bool ok = true;
+            for (auto& family : owner.families) {
+                family.resize(count);
+                if (!read_f64_array(fp, family)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok) throw std::runtime_error("truncated spectral geometry");
+            if (!check(DataGroup::GEOMETRY, true)) owner.families.clear();
+        } else if (!skip_bytes(fp, count * components * sizeof(double))) {
+            throw std::runtime_error(
+                "cannot locate groups after spectral geometry");
+        }
+        const bool metadata = selection.wants(DataGroup::GRID) ||
+                              selection.wants(DataGroup::INPUT);
+        if (!checkpoint && (metadata || selection.wants(DataGroup::FIELDS) ||
+                            selection.wants(DataGroup::PROVENANCE))) {
+            EquilibriumSnapshot fields;
+            fields.ns = ns;
+            reason.clear();
+            if (version >= 8 &&
+                !read_derived_fields(fp, fields, reason,
+                                     selection.wants(DataGroup::FIELDS))) {
+                selection.unavailable(DataGroup::FIELDS, reason);
+                for (auto group :
+                     {DataGroup::GRID, DataGroup::INPUT, DataGroup::PROVENANCE})
+                    selection.unavailable(
+                        group, "cannot locate group after fields: " + reason);
+                return finish();
+            }
+            if (fields.has_any_derived_fields())
+                owner.fields = {fields.ntheta, fields.nzeta,
+                                std::move(fields.half_fields),
+                                std::move(fields.full_fields)};
+            if (!check(DataGroup::FIELDS, owner.has_fields()))
+                owner.fields.reset();
+            if (metadata || selection.wants(DataGroup::PROVENANCE)) {
+                RunReport report;
+                reason.clear();
+                const bool framed = read_provenance(
+                    fp, version, report, selection.wants(DataGroup::PROVENANCE),
+                    reason);
+                if (!framed) {
+                    reason = "truncated or corrupt provenance framing";
+                    selection.unavailable(DataGroup::PROVENANCE, reason);
+                    selection.unavailable(DataGroup::GRID, reason);
+                    selection.unavailable(DataGroup::INPUT, reason);
+                    return finish();
+                }
+                if (selection.accept(DataGroup::PROVENANCE, true, reason))
+                    owner.provenance =
+                        std::move(static_cast<RunProvenance&>(report));
+            }
+        }
+        const bool has_input = version >= (checkpoint ? 2 : 3);
+        if (strict && !checkpoint && metadata && !has_input &&
+            (fgetc(fp) != EOF || ferror(fp)))
+            throw std::runtime_error("trailing data or read error");
+        if (metadata && has_input) {
+            if (version == (checkpoint ? 7 : 9)) {
+                reason = "JSON-based input record is no longer supported";
+                selection.unavailable(DataGroup::GRID, reason);
+                selection.unavailable(DataGroup::INPUT, reason);
+                return finish();
+            }
+            const long start = ftell(fp);
+            GridMetadata grid;
+            if (!read_i32(fp, grid.mpol) || !read_i32(fp, grid.ntor) ||
+                !read_i32(fp, grid.nfp) || !read_i32(fp, grid.ntheta) ||
+                !read_i32(fp, grid.nzeta)) {
+                selection.unavailable(DataGroup::GRID,
+                                      "truncated grid metadata");
+                selection.unavailable(DataGroup::INPUT,
+                                      "truncated input metadata");
+                return finish();
+            }
+            owner.grid = grid;
+            if (!check(DataGroup::GRID, true)) owner.grid.reset();
+            if (selection.wants(DataGroup::INPUT)) {
+                InputParams input;
+                reason.clear();
+                const bool profile_types = checkpoint
+                                               ? version == 3 || version >= 6
+                                               : version == 4 || version >= 7;
+                const int free_boundary = checkpoint
+                                              ? (version >= 6   ? 3
+                                                 : version >= 4 ? version - 2
+                                                                : 0)
+                                              : (version >= 7   ? 3
+                                                 : version >= 5 ? version - 3
+                                                                : 0);
+                const bool asymmetric =
+                    checkpoint
+                        ? version == 8 || (version >= 9 && components == 12)
+                        : version == 10 || (version >= 11 && components == 12);
+                const bool decoded =
+                    start >= 0 && fseek(fp, start, SEEK_SET) == 0 &&
+                    read_input_params(fp, input, reason, profile_types,
+                                      free_boundary, asymmetric,
+                                      version >= (checkpoint ? 9 : 11));
+                if (!decoded) {
+                    selection.unavailable(
+                        DataGroup::INPUT,
+                        reason.empty() ? "truncated input record" : reason);
+                } else {
+                    owner.input = std::move(input);
+                    if (strict && owner.input->lasym != (components == 12)) {
+                        selection.unavailable(DataGroup::INPUT,
+                                              "state/input symmetry mismatch");
+                        owner.input.reset();
+                    } else if (!check(DataGroup::INPUT, true)) {
+                        owner.input.reset();
+                    }
+                    if (strict && (fgetc(fp) != EOF || ferror(fp)))
+                        throw std::runtime_error("trailing data or read error");
+                }
+            }
+        }
+        return finish();
+    } catch (const std::exception& error) {
+        return Result<Equilibrium>("native binary: " +
+                                   std::string(error.what()));
+    }
+}
+
+}  // namespace io_detail
 
 // Binary-only factories are available without optional file libraries.
 std::unique_ptr<Writer> make_binary_writer() {
