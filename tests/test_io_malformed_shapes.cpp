@@ -529,18 +529,17 @@ static void test_netcdf(const TempDir& dir) {
               format("netcdf: fixture written ({})", c.label));
         std::unique_ptr<Reader> reader = make_reader(OutputFormat::NETCDF);
         RunReport rep;
-        rep.build.revision = "sentinel";
-        rep.total_effective_iterations = 12345;
-        const auto res = reader->read(path, rep);
+        auto request = state_request();
+        request[equilibrium::DataGroup::PROVENANCE] =
+            equilibrium::Requirement::REQUIRED;
+        const auto res = reader->read(path, request);
+        if (res) rep = report_from(res.value());
         remove(path.c_str());
         if (c.mut == NcMutation::NONE) {
             check(res.has_value(), format("netcdf: {}", c.label));
         } else {
             check(!res.has_value(),
                   format("netcdf: {} rejected with typed failure", c.label));
-            check(rep.build.revision == "sentinel" &&
-                      rep.total_effective_iterations == 12345,
-                  format("netcdf: {} leaves report transactional", c.label));
             if (c.error_contains != nullptr && !res.has_value()) {
                 check(res.error().find(c.error_contains) != std::string::npos,
                       format("netcdf: {} fails at expected boundary", c.label));
@@ -588,18 +587,17 @@ static void test_hdf5(const TempDir& dir) {
               format("hdf5: fixture written ({})", c.label));
         std::unique_ptr<Reader> reader = make_reader(OutputFormat::HDF5);
         RunReport rep;
-        rep.build.revision = "sentinel";
-        rep.total_effective_iterations = 12345;
-        const auto res = reader->read(path, rep);
+        auto request = state_request();
+        request[equilibrium::DataGroup::PROVENANCE] =
+            equilibrium::Requirement::REQUIRED;
+        const auto res = reader->read(path, request);
+        if (res) rep = report_from(res.value());
         remove(path.c_str());
         if (c.mut == H5Mutation::NONE) {
             check(res.has_value(), format("hdf5: {}", c.label));
         } else {
             check(!res.has_value(),
                   format("hdf5: {} rejected with typed failure", c.label));
-            check(rep.build.revision == "sentinel" &&
-                      rep.total_effective_iterations == 12345,
-                  format("hdf5: {} leaves report transactional", c.label));
             if (c.error_contains != nullptr && !res.has_value()) {
                 check(res.error().find(c.error_contains) != std::string::npos,
                       format("hdf5: {} fails at expected boundary", c.label));

@@ -4,20 +4,16 @@
 
 namespace equilibrium {
 
-enum class ReadMode { COMPLETE, STATE_ONLY };
 enum class ProfileWritePolicy { REQUIRE_PERSISTENCE, OMIT };
 
 struct WriteOptions {
     ProfileWritePolicy profiles = ProfileWritePolicy::REQUIRE_PERSISTENCE;
 };
 
-// COMPLETE requires saved input; result files also require their full report.
-// STATE_ONLY deliberately skips provenance, including unsupported historical
-// trailers, and returns no input, grid metadata, or run provenance.
-Result<Equilibrium> read_binary(const std::string& path,
-                                ReadMode mode = ReadMode::COMPLETE);
-Result<Equilibrium> read_binary(const std::string& path,
-                                const ReadRequest& request);
+// Native results and checkpoints share the quantity-request API.
+Result<Equilibrium> read_binary(
+    const std::string& path,
+    const ReadRequest& request = ReadRequest::all());
 
 enum class BinaryKind { NATIVE, BOOZER };
 // Classification belongs to the codecs; successful detection does not imply

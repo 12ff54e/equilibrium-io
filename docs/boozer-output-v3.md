@@ -1,5 +1,9 @@
 # Boozer output format version 3
 
+> Historical schema: current readers reject this file version. This document
+> defines scientific blocks retained by v7/v8. Current API and admission rules
+> are in [File compatibility](compatibility.md).
+
 This is the legacy format for stellarator-symmetric results without tracing
 data. Asymmetric legacy results use [version 4](boozer-output-v4.md).
 New transforms use [version 7](boozer-output-v7.md), which includes signed

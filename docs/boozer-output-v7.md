@@ -88,11 +88,10 @@ names above. Their `units` attributes are `Pa`, `T m`, and `T m`.
 `iota` keeps its existing dimensionless representation.
 
 In memory, `BoozerResult::profiles` holds `BoozerSurfaceProfiles`.
-Readers leave it absent for v3-v6 files. Writers preserve those legacy
-formats when rewriting results that lack profiles. A result with profiles
-must also contain the v6 tracing, magnetic-field, and map data.
+Readers accept v7/v8 and can select pressure and currents independently.
+Writers emit v8 and require profiles, tracing, magnetic fields, and maps.
 
 Tests cover analytic pressure profiles, both pressure types, pedestal and
 flux clipping, both radial orders, field reversal, nonunit `nfp`, rational
-iota, HOST/CUDA shift coefficients, all three containers, legacy absence,
+iota, HOST/CUDA shift coefficients, all three containers, optional quantity failures,
 and malformed or truncated profile data.

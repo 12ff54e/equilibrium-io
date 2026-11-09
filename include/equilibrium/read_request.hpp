@@ -105,6 +105,13 @@ struct ReadRequest {
         quantities;
 
     ReadRequest() { quantities.fill(Requirement::IGNORED); }
+    // Read every available quantity. Missing or invalid optional data are
+    // reported in diagnostics; consumers mark their prerequisites REQUIRED.
+    static ReadRequest all() {
+        ReadRequest request;
+        request.quantities.fill(Requirement::OPTIONAL);
+        return request;
+    }
     Requirement& operator[](Quantity quantity) {
         return quantities[static_cast<std::size_t>(quantity)];
     }

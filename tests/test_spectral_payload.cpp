@@ -34,17 +34,17 @@ std::vector<std::uint8_t> fixture(int version, int components = 6) {
 }  // namespace
 
 int main() {
-    for (int version : {0, 1, 8, 9, 10, 11}) {
-        const int components = version >= 9 ? 12 : 6;
+    for (int version : {10, 11}) {
+        const int components = version == 10 ? 12 : 6;
         auto bytes = fixture(version, components);
-        const std::size_t offset = version == 0 ? 8 : version >= 9 ? 24 : 20;
+        const std::size_t offset = 24;
         const std::vector<std::uint8_t> expected(bytes.begin() + offset,
                                                  bytes.end());
         save(bytes);
-        auto payload = read_spectral_payload("payload.bin", version == 0);
+        auto payload = read_spectral_payload("payload.bin");
         check(payload && payload.value().bytes == expected,
               "spectral bytes survive without derived fields or provenance");
-        auto state = read_spectral_state("payload.bin", version == 0);
+        auto state = read_spectral_state("payload.bin");
         check(state && state.value().ns == 2 && state.value().mnmax == 1 &&
                   state.value().components() == components,
               "numeric state uses the same payload layout");
@@ -55,24 +55,20 @@ int main() {
                           state.value().families[1][0]) == 0x7ff8000000001234,
                   "decoding preserves signed zero and NaN payload bits");
         }
-        if (!version) {
-            check(!read_spectral_payload("payload.bin"),
-                  "legacy requires opt-in");
-            bytes.push_back(0);
-            save(bytes);
-            check(!read_spectral_payload("payload.bin", true),
-                  "legacy requires exact length");
-        } else {
             bytes.push_back(42);
             save(bytes);
             payload = read_spectral_payload("payload.bin");
             check(payload && payload.value().bytes == expected,
                   "trailing bytes do not affect bitwise comparison");
-        }
-        bytes.resize(offset + expected.size() - 1);
-        save(bytes);
-        check(!read_spectral_payload("payload.bin", version == 0),
-              "short payload rejected");
+            bytes.resize(offset + expected.size() - 1);
+            save(bytes);
+            check(!read_spectral_payload("payload.bin"),
+                  "short payload rejected");
+    }
+    for (int version : {0, 1, 8, 9, 12}) {
+        save(fixture(version));
+        check(!read_spectral_payload("payload.bin"),
+              "dropped and future versions rejected");
     }
     for (std::size_t size : {0u, 7u, 19u, 20u, 23u}) {
         auto bytes = fixture(10, 12);
@@ -86,7 +82,7 @@ int main() {
     bytes = fixture(10, 7);
     save(bytes);
     check(!read_spectral_payload("payload.bin"), "wrong family count rejected");
-    bytes = fixture(1);
+    bytes = fixture(11);
     bytes[12] = bytes[13] = bytes[14] = 255;
     bytes[15] = 127;
     save(bytes);

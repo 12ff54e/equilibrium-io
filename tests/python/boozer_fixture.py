@@ -16,7 +16,7 @@ def _string(value):
     return struct.pack("<i", len(encoded)) + encoded
 
 
-def _manufactured_file(path, version=3, lasym=False):
+def _manufactured_file(path, version=8, lasym=False):
     source_ns = 4
     first_surface = 1
     surfaces = source_ns - first_surface

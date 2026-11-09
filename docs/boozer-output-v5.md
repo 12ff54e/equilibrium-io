@@ -1,5 +1,9 @@
 # Boozer output format version 5
 
+> Historical schema: current readers reject this file version. This document
+> defines scientific blocks retained by v7/v8. Current API and admission rules
+> are in [File compatibility](compatibility.md).
+
 Version 5 introduced signed flux and axis data for both symmetries.
 New transforms write [version 7](boozer-output-v7.md), which adds magnetic
 components in the Boozer basis, untruncated coordinate maps, pressure,

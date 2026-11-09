@@ -1,6 +1,7 @@
 #include "equilibrium/spectral_payload.hpp"
 
 #include "equilibrium/writer_helpers.hpp"
+#include "format_versions.hpp"
 
 #include <array>
 #include <bit>
@@ -20,8 +21,7 @@ std::int32_t read_i32(const std::array<std::uint8_t, 24>& bytes,
 
 }  // namespace
 
-Result<SpectralPayload> read_spectral_payload(const std::string& path,
-                                              bool allow_legacy) {
+Result<SpectralPayload> read_spectral_payload(const std::string& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) return Result<SpectralPayload>("could not open " + path);
     const auto end = file.tellg();
@@ -41,19 +41,16 @@ Result<SpectralPayload> read_spectral_payload(const std::string& path,
         if (header_size < 20)
             return Result<SpectralPayload>("truncated state header: " + path);
         const int version = read_i32(header, 8);
-        if (version < 1 || version > 11)
+        if (!io_detail::supported_version(version, io_detail::NATIVE_VERSION))
             return Result<SpectralPayload>("unsupported state version: " +
                                            path);
         payload.ns = read_i32(header, 12);
         payload.mnmax = read_i32(header, 16);
-        offset = version >= 9 ? 24 : 20;
+        offset = 24;
         if (header_size < static_cast<std::streamsize>(offset))
             return Result<SpectralPayload>("truncated component count: " +
                                            path);
-        if (version >= 9) payload.components = read_i32(header, 20);
-    } else if (allow_legacy) {
-        payload.ns = read_i32(header, 0);
-        payload.mnmax = read_i32(header, 4);
+        payload.components = read_i32(header, 20);
     } else {
         return Result<SpectralPayload>("not a cuMES state container: " + path);
     }
@@ -70,8 +67,6 @@ Result<SpectralPayload> read_spectral_payload(const std::string& path,
         checked_mul(*family_size, payload.components * sizeof(double));
     if (!size || file_size < offset || *size > file_size - offset)
         return Result<SpectralPayload>("truncated state payload: " + path);
-    if (!versioned && file_size - offset != *size)
-        return Result<SpectralPayload>("legacy state size mismatch: " + path);
     file.clear();
     file.seekg(static_cast<std::streamoff>(offset));
     payload.bytes.resize(*size);
@@ -82,9 +77,8 @@ Result<SpectralPayload> read_spectral_payload(const std::string& path,
     return payload;
 }
 
-Result<EquilibriumSnapshot> read_spectral_state(const std::string& path,
-                                                bool allow_legacy) {
-    auto result = read_spectral_payload(path, allow_legacy);
+Result<EquilibriumSnapshot> read_spectral_state(const std::string& path) {
+    auto result = read_spectral_payload(path);
     if (!result) return Result<EquilibriumSnapshot>(result.error());
     const auto& payload = result.value();
     EquilibriumSnapshot state;

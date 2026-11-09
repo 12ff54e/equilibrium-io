@@ -27,7 +27,7 @@ BoozerOutputSpec resolve_boozer_output_spec(const std::filesystem::path& path);
 bool boozer_output_format_available(BoozerOutputFormat format);
 std::string_view boozer_output_suffix(BoozerOutputFormat format);
 
-// Write the selected container, using v8 when flux lists are present.
+// Write a complete v8 record in the selected container.
 // Publish atomically; failures before rename preserve the destination.
 // The result can also remain in memory without serialization.
 void write_boozer_output(const BoozerOutputSpec& spec,

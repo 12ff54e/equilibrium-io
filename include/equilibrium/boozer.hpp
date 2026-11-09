@@ -117,10 +117,6 @@ struct BasicBoozerTracingData {
     // field ordering and physical-angle units match EquilibriumSnapshot.
     Buffer axis_half_s;
     std::array<Buffer, EquilibriumSnapshot::HALF_FIELD_COUNT> axis_half_fields;
-
-    // Present in v6: components in the Boozer basis, sampled on grid.
-    // grid.nu and grid.source_theta_shift retain the untruncated angle map.
-    std::optional<BasicBoozerMagneticData<Buffer>> magnetic;
 };
 using BoozerTracingData =
     BasicBoozerTracingData<std::vector<double>, std::string>;
@@ -162,16 +158,14 @@ struct BasicBoozerResult {
     std::optional<BasicRealBoozerSpectrum<Buffer, Indices>> real_spectrum;
     ReadDiagnostics read_diagnostics;
 
-    // Present in new transforms and v5 files. Absent in legacy v3/v4 files:
-    // their magnetic-field polarity and axis cannot be recovered from |B|.
+    // A selected read can retain any subset of this record's quantities.
     std::optional<BasicBoozerTracingData<Buffer, String>> tracing;
 
-    // Present in new transforms and v7 files; absent in legacy v3-v6 files.
     std::optional<BasicBoozerSurfaceProfiles<Buffer>> profiles;
 
-    // For selected reads with tracing ignored, magnetic data remain usable.
-    // Complete/legacy reads retain the existing tracing->magnetic location.
-    std::optional<BasicBoozerMagneticData<Buffer>> independent_magnetic;
+    // Components in the Boozer basis, sampled on grid. Independent of the
+    // tracing quantities; grid.nu/source_theta_shift hold the angle maps.
+    std::optional<BasicBoozerMagneticData<Buffer>> magnetic;
 
     bool has_quantity(Quantity q) const {
         if (q == Quantity::GEOMETRY || q == Quantity::SPECTRAL_SHIFT) {
@@ -245,8 +239,7 @@ struct BasicBoozerResult {
     bool has_profiles() const { return has_group(DataGroup::PROFILES); }
     std::optional<std::reference_wrapper<const BasicBoozerMagneticData<Buffer>>>
     magnetic_data() const& {
-        if (independent_magnetic) return std::cref(*independent_magnetic);
-        if (tracing && tracing->magnetic) return std::cref(*tracing->magnetic);
+        if (magnetic) return std::cref(*magnetic);
         return std::nullopt;
     }
     bool has_magnetic() const { return has_group(DataGroup::MAGNETIC); }
@@ -420,16 +413,11 @@ inline BoozerView as_view(const BoozerResult& owner) {
         v.axis_half_s = t.axis_half_s;
         for (std::size_t i = 0; i < v.axis_half_fields.size(); ++i)
             v.axis_half_fields[i] = t.axis_half_fields[i];
-        if (t.magnetic) {
-            auto& m = v.magnetic.emplace();
-            for (std::size_t i = 0; i < m.fields.size(); ++i)
-                m.fields[i] = t.magnetic->fields[i];
-        }
     }
-    if (owner.independent_magnetic) {
-        auto& m = view.independent_magnetic.emplace();
+    if (owner.magnetic) {
+        auto& m = view.magnetic.emplace();
         for (std::size_t i = 0; i < m.fields.size(); ++i)
-            m.fields[i] = owner.independent_magnetic->fields[i];
+            m.fields[i] = owner.magnetic->fields[i];
     }
     if (owner.profiles)
         view.profiles = {owner.profiles->pressure, owner.profiles->current_i,

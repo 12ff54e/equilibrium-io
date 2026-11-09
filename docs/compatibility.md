@@ -1,88 +1,69 @@
 # File compatibility contract
 
 The package owns cuMES result/checkpoint codecs and magnetic-coordinate Boozer
-result codecs. It does not depend on the
-cuMES solver and does not interpret another program's format as cuMES data.
+codecs. It does not depend on the cuMES solver.
 
-| Container | State recovery | Complete record |
+| Container | Accepted versions | Written version |
 | --- | --- | --- |
-| Binary result, `CUMES001` | Versions 1–11 | Typed saved input in v3–8 and v10–11; full provenance and structural validation required |
-| Checkpoint, `CUMECKP1` | Versions 1–9 | Typed saved input in v2–6 and v8–9; no run provenance |
-| NetCDF / HDF5 result | Logical schema 1 | Required scientific structure, saved input, and run provenance |
-| Boozer binary, `MCBOOZ` | Versions 3–8 | Optional groups follow the stored version; source path retained |
-| Boozer NetCDF / HDF5 | Export only | Existing v3–v8 schemas and real-parity normalization |
+| Binary result, `CUMES001` | 10, 11 | 11 |
+| Checkpoint, `CUMECKP1` | 8, 9 | 9 |
+| NetCDF / HDF5 native result | Logical schema 1 | 1 |
+| Boozer binary, `MCBOOZ` | 7, 8 | 8 |
+| Boozer NetCDF / HDF5 | Python analysis reads 7, 8; C++ export only | 8 |
 
-Binary v9 and checkpoint v7 used an obsolete JSON input extension. Explicit
-state-only reads recover their spectral state; complete reads reject their
-input. Older records that lack the input required for analysis also need an
-explicit state-only read. A failed complete read never falls back to that mode.
+Only the latest two versions of each versioned format are supported. Older,
+unversioned, and future versions fail before payload decoding. This applies
+to full reads, selected reads, Python analysis, and C++/JavaScript payload
+inspection. Native NetCDF/HDF5 still has one logical schema. NetCDF-4 needs a
+`.nc` suffix or explicit codec selection because it shares HDF5's signature.
 
-Current writers retain the existing version selection: binary v8 and
-checkpoint v6 for symmetric polynomial-flux input, binary v10 and checkpoint
-v8 for asymmetric polynomial-flux input, and binary v11 and checkpoint v9 for
-list flux input. NetCDF output uses the existing classic schema; readers also
-accept its NetCDF-4 representation. NetCDF-4 needs a `.nc` suffix or explicit
-codec selection because it shares HDF5's signature.
+All current writers emit the latest schema, regardless of symmetry or flux
+kind. Boozer v8 always includes its symmetry flag, tracing, magnetic fields,
+angle maps, surface profiles, and trailing `pflux_type`. The selector accepts
+`power_series` and `list`; v7 implies `power_series`. A writer rejects an
+incomplete result before opening its output. `source_format_version` is source
+provenance, not the Boozer container version.
 
-Spectral state remains double on disk. Preserve family order, radial
-staggering, mode and point layouts, units, raw harmonic ordering, duplicates,
-explicit zeros, folded boundaries, profile selectors, and provenance. Container
-conversion preserves decoded values and metadata without solving or resampling.
-The README defines the scientific array conventions.
+Result v10 and checkpoint v8 always include an asymmetric input extension,
+even for six-family state. Result v11 and checkpoint v9 include that extension
+only for twelve-family state, then append the flux selector.
 
-Missing groups remain absent. Current result files can contain the complete
-scientific-field block; checkpoints cannot. Neither format stores solved
-radial profiles. Writers reject populated profiles unless the caller explicitly
-chooses omission. Input profile prescriptions do not replace solved profiles.
+## Requests and ownership
 
-A format extension must introduce a version or schema rule that old readers
-can reject safely. It must not reinterpret bytes under an existing version or
-invent missing physical data. Keep historical state recovery separate from
-complete-record admission. Add regression fixtures for new formats and retain
-coverage for the supported historical versions. Report intentional reader
-compatibility changes in the changelog.
+All C++ reads use `ReadRequest`. No-options reads use `ReadRequest::all()`,
+which treats every quantity as optional. Consumers mark their prerequisites
+`REQUIRED`. Optional quantities fail independently and retain diagnostics;
+group assignments expand presets, and later assignments win. Coordinate
+framing remains mandatory. Unused trailing bytes are allowed.
 
-Writers publish by renaming a completed temporary file in the destination
-directory. Pre-rename failures preserve the destination. A directory-sync
-failure after rename reports unconfirmed durability after replacement.
+Group capability queries require every member; group diagnostics can report
+`PARTIAL`. Writers reject selections missing required output data. Conversion
+requests all quantities and rejects invalid data before writing. It preserves
+values and provenance without solving or resampling. Native files contain no
+solved radial profiles; input prescriptions do not replace them.
 
-The initial extraction passed byte comparisons for five binary fixtures and
-full-precision schema/value comparisons for ten NetCDF/HDF5 fixtures, covering
-symmetry, asymmetry, free-boundary provenance, and list profiles. This library
-now owns the historical-reader, malformed-container, codec, and installed-package
-regression suites. cuMES retains adapter, derived-field, solver, and browser
-integration checks.
+Boozer reads default to `SpectrumStorage::REAL`, preserving stored real
+coefficients, including inactive terms. `COMPLEX` and `BOTH` remain runtime
+options. Magnetic arrays have one owner in `BoozerResult::magnetic`.
 
-Selected reads provide a separate admission contract: required, optional
-and ignored quantities have independent validation and diagnostics. Group
-assignments expand presets; later assignments override their members.
-See [Requested quantities](../README.md#requested-quantities). These reads
-use capabilities rather than consumer version gates and permit unused
-trailing binary data. Existing no-options APIs retain their strict behavior.
-Group capability checks require all members; group diagnostics can report
-`PARTIAL`. Writers reject selections that omit data required by the output schema.
-The new request and view types change the C++ ABI; consumers must rebuild.
+The C++ API has no backward compatibility layer. `ReadMode`, `read_checkpoint`,
+the `Reader` report out-parameter, `allow_legacy`, and nested magnetic storage
+have been removed. Consumers must migrate and rebuild. Producer snapshot/view
+adapters remain available for writers.
 
-## Analysis readers
+## Data and publication
 
-The Python `equilibrium_io.load_state` API retains the former cuMES plotting
-reader's tuple, family ordering, NumPy array layout, and input dictionaries.
-It does not import plotting modules. Format rejection raises `ValueError`;
-callers can catch errors instead of handling process termination.
+Preserve binary64 storage, family order, radial staggering, layouts, units,
+raw harmonic order, duplicates, explicit zeros, folded boundaries, profile
+selectors, and provenance. Scientific convention labels such as
+`mixed-grid-v2` and `real-parity-v3` describe mathematics, not admission versions.
+The linked older Boozer documents define blocks retained in current layouts.
 
-C++ spectral-payload inspection accepts a result header and its complete state
-payload without reading later fields or provenance. This is a distinct contract
-from `ReadMode::STATE_ONLY`, which also reads any stored derived-field block.
-Byte inspection preserves every stored bit and does not check finiteness.
-Legacy files remain opt-in. Comparison tools retain responsibility for numerical
-acceptance and bitwise-equality policy.
+Python readers raise `ValueError` for format errors and retain their analysis
+array layouts. Spectral-payload inspection reads only the result's spectral
+bytes, without requiring later fields or metadata or checking finiteness.
+Comparison tools own numerical acceptance and bitwise-equality policy.
 
-Boozer data types moved from magnetic-coordinate to this package in 0.2.
-magnetic-coordinate retains source aliases, but consumers must rebuild because
-the C++ ABI changed. Flux lists select Boozer v8; surface profiles select v7;
-older results keep their older schema. Default complex reads may round spectral
-parity pairs through the complex/real normalization. Select
-`SpectrumStorage::REAL` or `BOTH` to retain the stored real coefficients exactly.
-Writers prefer retained real arrays. Sampled fields, profiles, angle maps and
-metadata remain exact. No mathematical transform or resampling occurs during
-container conversion.
+Writers rename a completed temporary file in the destination directory.
+Pre-rename failures preserve the destination. A directory-sync failure after
+rename reports unconfirmed durability after replacement.

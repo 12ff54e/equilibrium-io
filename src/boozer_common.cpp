@@ -66,10 +66,6 @@ void validate_group(const BoozerResult& result, DataGroup group) {
     auto status = validate_boozer_coordinates(view);
     if (!status) throw std::invalid_argument(status.error());
     for (auto q : group_quantities(group)) {
-        if ((group == DataGroup::TRACING && !result.tracing) ||
-            (group == DataGroup::MAGNETIC && !result.magnetic_data()) ||
-            (group == DataGroup::PROFILES && !result.profiles))
-            continue;
         status = validate_quantity(view, q);
         if (!status) throw std::invalid_argument(status.error());
     }
@@ -95,14 +91,6 @@ void validate_result(const BoozerResult& result) {
          {DataGroup::GEOMETRY, DataGroup::STRENGTH, DataGroup::TRACING,
           DataGroup::MAGNETIC, DataGroup::PROFILES})
         validate_group(result, group);
-    // Current output schemas store these records together. Selected reads may
-    // expose them independently, but cannot be written as a complete file.
-    if (result.independent_magnetic ||
-        (result.profiles && (!result.tracing || !result.tracing->magnetic)) ||
-        (result.tracing && result.tracing->pflux_type == "list" &&
-         !result.profiles))
-        throw std::invalid_argument(
-            "selected Boozer groups cannot form a complete output");
 }
 
 RealBoozerSpectrum make_real_spectrum(const BoozerResult& result) {

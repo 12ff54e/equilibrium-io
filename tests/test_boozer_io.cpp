@@ -41,6 +41,8 @@ void expect(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
+equilibrium::BoozerResult complete_result(equilibrium::BoozerResult result);
+
 equilibrium::BoozerResult make_result() {
     equilibrium::BoozerResult original;
     original.source_format_version = 8;
@@ -70,7 +72,7 @@ equilibrium::BoozerResult make_result() {
     original.spectrum.r = {{1.0, 0.0}, {3.0, 0.0}};
     original.spectrum.z = {{0.0, 0.0}, {0.0, 0.0}};
     original.spectrum.nu = {{0.0, 0.0}, {0.0, 0.0}};
-    return original;
+    return complete_result(std::move(original));
 }
 
 equilibrium::BoozerResult make_asymmetric_result() {
@@ -138,7 +140,7 @@ equilibrium::BoozerResult make_asymmetric_result() {
                 spectrum.z.push_back(-2.0 * value);
                 spectrum.nu.push_back(0.01 * value);
             }
-    return result;
+    return complete_result(std::move(result));
 }
 
 equilibrium::BoozerResult with_tracing(equilibrium::BoozerResult result) {
@@ -164,7 +166,7 @@ equilibrium::BoozerResult with_tracing(equilibrium::BoozerResult result) {
 }
 
 void with_magnetic(equilibrium::BoozerResult& result) {
-    auto& magnetic = result.tracing->magnetic.emplace();
+    auto& magnetic = result.magnetic.emplace();
     for (std::size_t field = 0; field < magnetic.fields.size(); ++field)
         magnetic.fields[field].assign(result.grid.b.size(),
                                       -0.3 * static_cast<double>(field + 1));
@@ -184,6 +186,28 @@ void with_profiles(equilibrium::BoozerResult& result) {
     profiles.pressure = {1200.0, 100.0};
     profiles.current_i = {0.2, 0.3};
     profiles.current_g = {-1.7, -2.2};
+}
+
+equilibrium::BoozerResult complete_result(equilibrium::BoozerResult result) {
+    auto nu = std::move(result.grid.nu);
+    result = with_tracing(std::move(result));
+    with_magnetic(result);
+    if (!nu.empty()) result.grid.nu = std::move(nu);
+    with_profiles(result);
+    return result;
+}
+
+equilibrium::BoozerFile read_complete_boozer(
+    const std::filesystem::path& path) {
+    using namespace equilibrium;
+    BoozerReadOptions options;
+    for (auto group :
+         {DataGroup::GEOMETRY, DataGroup::STRENGTH, DataGroup::TRACING,
+          DataGroup::MAGNETIC, DataGroup::PROFILES})
+        options.request[group] = Requirement::REQUIRED;
+    options.request[Quantity::ROTATIONAL_TRANSFORM] = Requirement::REQUIRED;
+    options.spectrum = SpectrumStorage::COMPLEX;
+    return read_boozer_binary(path, options);
 }
 
 using NamedArray = std::pair<const char*, std::span<const double>>;
@@ -207,8 +231,8 @@ std::vector<NamedArray> tracing_arrays(
                            "axis_half_bsubv"};
     for (std::size_t i = 0; i < data.axis_half_fields.size(); ++i)
         arrays.emplace_back(names[i], data.axis_half_fields[i]);
-    if (data.magnetic) {
-        const auto& magnetic = *data.magnetic;
+    if (result.magnetic) {
+        const auto& magnetic = *result.magnetic;
         const char* names[] = {"boozer_sqrtg", "boozer_bsups", "boozer_bsupu",
                                "boozer_bsupv", "boozer_bsubs", "boozer_bsubu",
                                "boozer_bsubv"};
@@ -226,38 +250,23 @@ std::vector<NamedArray> tracing_arrays(
     return arrays;
 }
 
-void test_tracing_round_trip(bool lasym,
-                             bool magnetic_fields,
-                             bool surface_profiles = false) {
+void test_tracing_round_trip(bool lasym) {
     auto original =
         with_tracing(lasym ? make_asymmetric_result() : make_result());
-    if (magnetic_fields) with_magnetic(original);
-    if (surface_profiles) with_profiles(original);
     const auto path = std::filesystem::current_path() /
                       "magnetic-coordinate-boozer-tracing.bin";
-    auto legacy = original;
-    legacy.tracing.reset();
-    legacy.profiles.reset();
-    equilibrium::write_boozer_binary(path, legacy, "manufactured");
-    const auto reference = equilibrium::read_boozer_binary(path);
     equilibrium::write_boozer_binary(path, original, "manufactured");
     {
         std::ifstream input(path, std::ios::binary);
         std::string magic(8, '\0');
         input.read(magic.data(), 8);
-        expect(magic == (surface_profiles  ? "MCBOOZ07"
-                         : magnetic_fields ? "MCBOOZ06"
-                                           : "MCBOOZ05"),
-               "incorrect tracing format version");
+        expect(magic == "MCBOOZ08", "incorrect tracing format version");
     }
-    const auto loaded = equilibrium::read_boozer_binary(path);
+    const auto loaded = read_complete_boozer(path);
     expect(loaded.result.lasym == lasym && loaded.result.tracing.has_value(),
            "tracing metadata");
-    expect(loaded.result.tracing->magnetic.has_value() == magnetic_fields,
-           "legacy v5 must not invent Boozer components or maps");
-    expect(loaded.result.profiles.has_value() == surface_profiles &&
-               !reference.result.profiles,
-           "legacy files must not invent surface profiles");
+    expect(loaded.result.has_magnetic() && loaded.result.has_profiles(),
+           "complete v8 records missing");
     const auto expected = tracing_arrays(original);
     const auto actual = tracing_arrays(loaded.result);
     expect(loaded.result.tracing->phiedge == original.tracing->phiedge,
@@ -270,36 +279,47 @@ void test_tracing_round_trip(bool lasym,
                expected[i].first);
     expect(loaded.result.grid.b == original.grid.b &&
                loaded.result.grid.sqrtg_b == original.grid.sqrtg_b,
-           "v5 must preserve the non-axis grids");
-    expect(loaded.result.spectrum.r == reference.result.spectrum.r &&
-               loaded.result.spectrum.z == reference.result.spectrum.z &&
-               loaded.result.spectrum.nu == reference.result.spectrum.nu,
-           "v5 must preserve spectra");
+           "non-axis grids changed");
+    {
+        std::ifstream input(path, std::ios::binary);
+        std::string bytes{std::istreambuf_iterator<char>(input), {}};
+        bytes.resize(bytes.size() - 16);
+        bytes[7] = '7';
+        bytes[8] = 7;
+        std::ofstream(path, std::ios::binary).write(bytes.data(), bytes.size());
+        const auto previous = read_complete_boozer(path);
+        expect(
+            previous.result.lasym == lasym &&
+                previous.result.tracing->pflux_type == "power_series" &&
+                previous.result.spectrum.r == loaded.result.spectrum.r &&
+                previous.result.magnetic->fields == original.magnetic->fields &&
+                previous.result.profiles->current_g ==
+                    original.profiles->current_g,
+            "complete v7 read changed physical data");
+    }
+    equilibrium::write_boozer_binary(path, original, "manufactured");
     std::filesystem::resize_file(path, std::filesystem::file_size(path) - 1);
     bool truncated = false;
     try {
-        static_cast<void>(equilibrium::read_boozer_binary(path));
+        static_cast<void>(read_complete_boozer(path));
     } catch (const std::runtime_error&) { truncated = true; }
     expect(truncated, "truncated tracing data accepted");
-    if (surface_profiles) {
+    {
         equilibrium::write_boozer_binary(path, original, "manufactured");
         {
             std::fstream output(
                 path, std::ios::binary | std::ios::in | std::ios::out);
-            output.seekp(-8, std::ios::end);
+            output.seekp(-24, std::ios::end);
             const unsigned char nan[] = {0, 0, 0, 0, 0, 0, 0xf8, 0x7f};
             output.write(reinterpret_cast<const char*>(nan), 8);
         }
         bool rejected = false;
         try {
-            static_cast<void>(equilibrium::read_boozer_binary(path));
-        } catch (const std::invalid_argument&) { rejected = true; }
-        expect(rejected, "non-finite v7 profile accepted by reader");
+            static_cast<void>(read_complete_boozer(path));
+        } catch (const std::exception&) { rejected = true; }
+        expect(rejected, "non-finite profile accepted by reader");
     }
-    for (int invalid_case = 0; invalid_case < (surface_profiles  ? 20
-                                               : magnetic_fields ? 11
-                                                                 : 6);
-         ++invalid_case) {
+    for (int invalid_case = 0; invalid_case < 20; ++invalid_case) {
         auto invalid = original;
         auto& data = *invalid.tracing;
         switch (invalid_case) {
@@ -323,13 +343,13 @@ void test_tracing_round_trip(bool lasym,
                 data.aphi.assign(1, 0.0);
                 break;
             case 6:
-                data.magnetic->fields[0][0] = 0.0;
+                invalid.magnetic->fields[0][0] = 0.0;
                 break;
             case 7:
-                data.magnetic->fields[3].pop_back();
+                invalid.magnetic->fields[3].pop_back();
                 break;
             case 8:
-                data.magnetic->fields[1][0] =
+                invalid.magnetic->fields[1][0] =
                     std::numeric_limits<double>::quiet_NaN();
                 break;
             case 9:
@@ -365,7 +385,7 @@ void test_tracing_round_trip(bool lasym,
                     -invalid.iota[0] * invalid.profiles->current_i[0];
                 break;
             case 18:
-                data.magnetic.reset();
+                invalid.magnetic.reset();
                 break;
             case 19:
                 invalid.tracing.reset();
@@ -397,7 +417,7 @@ void test_flux_list_round_trip() {
         bytes.read(magic.data(), 8);
         bytes.close();
         expect(magic == "MCBOOZ08", "flux list requires Boozer version 8");
-        const auto loaded = equilibrium::read_boozer_binary(path);
+        const auto loaded = read_complete_boozer(path);
         expect(
             loaded.result.lasym == lasym &&
                 loaded.result.source_format_version == 11 &&
@@ -409,7 +429,7 @@ void test_flux_list_round_trip() {
                                      std::filesystem::file_size(path) - 1);
         bool rejected = false;
         try {
-            static_cast<void>(equilibrium::read_boozer_binary(path));
+            static_cast<void>(read_complete_boozer(path));
         } catch (const std::runtime_error&) { rejected = true; }
         expect(rejected, "truncated flux type rejected");
         original.tracing->aphi = {1, 0};
@@ -431,14 +451,13 @@ void test_asymmetric_round_trip() {
         std::ifstream input(path, std::ios::binary);
         std::string magic(8, '\0');
         input.read(magic.data(), 8);
-        expect(magic == "MCBOOZ04", "asymmetric output requires version 4");
+        expect(magic == "MCBOOZ08", "asymmetric output uses version 8");
     }
-    const auto loaded = equilibrium::read_boozer_binary(path);
+    const auto loaded = read_complete_boozer(path);
     expect(loaded.result.lasym && loaded.result.source_format_version == 10,
            "asymmetric output metadata");
-    expect(!loaded.result.tracing,
-           "legacy v4 must not invent polarity or axis data");
-    expect(!loaded.result.profiles, "legacy v4 must not invent profiles");
+    expect(loaded.result.has_tracing() && loaded.result.has_profiles(),
+           "complete v8 metadata");
     const auto& spectrum = loaded.result.spectrum;
     const std::vector<double>* fields[] = {&original.grid.r, &original.grid.z,
                                            &original.grid.nu};
@@ -472,7 +491,7 @@ void test_asymmetric_round_trip() {
     std::filesystem::resize_file(path, std::filesystem::file_size(path) - 1);
     bool truncated = false;
     try {
-        static_cast<void>(equilibrium::read_boozer_binary(path));
+        static_cast<void>(read_complete_boozer(path));
     } catch (const std::runtime_error&) { truncated = true; }
     expect(truncated, "truncated asymmetric output accepted");
     const auto reject = [&] {
@@ -495,12 +514,11 @@ void test_round_trip() {
     const auto path = std::filesystem::current_path() /
                       "magnetic-coordinate-boozer-roundtrip.bin";
     equilibrium::write_boozer_binary(path, original, "source-output.bin");
-    const auto loaded = equilibrium::read_boozer_binary(path);
+    const auto loaded = read_complete_boozer(path);
     std::filesystem::remove(path);
     expect(loaded.source_path == "source-output.bin", "source provenance");
-    expect(!loaded.result.tracing,
-           "legacy v3 must not invent polarity or axis data");
-    expect(!loaded.result.profiles, "legacy v3 must not invent profiles");
+    expect(loaded.result.has_tracing() && loaded.result.has_profiles(),
+           "complete v8 metadata");
     expect(loaded.result.source_format_version == 8, "source version");
     expect(loaded.result.nfp == 5, "nfp");
     expect(loaded.result.resonance_tolerance == 2.0e-11, "resonance tolerance");
@@ -556,7 +574,7 @@ void test_nontrivial_real_parity_round_trip() {
     const auto path = std::filesystem::current_path() /
                       "magnetic-coordinate-boozer-parity.bin";
     equilibrium::write_boozer_binary(path, original, "source.bin");
-    const auto loaded = equilibrium::read_boozer_binary(path);
+    const auto loaded = read_complete_boozer(path);
     std::filesystem::remove(path);
     const auto close = [](const auto& left, const auto& right) {
         if (left.size() != right.size()) return false;
@@ -602,17 +620,10 @@ void test_dispatch() {
 }
 
 #ifdef EQUILIBRIUM_HAVE_NETCDF
-void test_netcdf_output(bool lasym,
-                        bool tracing,
-                        bool magnetic_fields = false,
-                        bool surface_profiles = false,
-                        bool flux_list = false) {
+void test_netcdf_output(bool lasym, bool flux_list) {
     const auto path = std::filesystem::current_path() /
                       "magnetic-coordinate-boozer-output.nc";
     auto original = lasym ? make_asymmetric_result() : make_result();
-    if (tracing) original = with_tracing(std::move(original));
-    if (magnetic_fields) with_magnetic(original);
-    if (surface_profiles) with_profiles(original);
     if (flux_list) {
         original.tracing->pflux_type = "list";
         original.tracing->aphi = {1, 2, 1};
@@ -670,7 +681,7 @@ void test_netcdf_output(bool lasym,
                    "NetCDF complementary family normalization");
         }
     }
-    if (tracing) {
+    {
         double phiedge = 0.0;
         expect(nc_get_att_double(file, NC_GLOBAL, "phiedge", &phiedge) ==
                        NC_NOERR &&
@@ -678,11 +689,7 @@ void test_netcdf_output(bool lasym,
                "NetCDF signed flux");
         char schema[64] = {};
         expect(nc_get_att_text(file, NC_GLOBAL, "schema", schema) == NC_NOERR &&
-                   std::string(schema) ==
-                       (flux_list          ? "magnetic-coordinate-boozer-v8"
-                        : surface_profiles ? "magnetic-coordinate-boozer-v7"
-                        : magnetic_fields  ? "magnetic-coordinate-boozer-v6"
-                                           : "magnetic-coordinate-boozer-v5"),
+                   std::string(schema) == "magnetic-coordinate-boozer-v8",
                "NetCDF schema");
         if (flux_list) {
             char type[16] = {};
@@ -699,9 +706,9 @@ void test_netcdf_output(bool lasym,
                     actual ==
                         std::vector<double>(expected.begin(), expected.end()),
                 name);
-            if (surface_profiles && (std::string(name) == "pressure" ||
-                                     std::string(name) == "current_i" ||
-                                     std::string(name) == "current_g")) {
+            if ((std::string(name) == "pressure" ||
+                 std::string(name) == "current_i" ||
+                 std::string(name) == "current_g")) {
                 char units[8] = {};
                 expect(nc_get_att_text(file, variable, "units", units) ==
                                NC_NOERR &&
@@ -732,26 +739,16 @@ void test_netcdf_output(bool lasym,
             }
         }
     }
-    if (!surface_profiles)
-        expect(nc_inq_varid(file, "pressure", &variable) == NC_ENOTVAR,
-               "legacy NetCDF must not invent pressure");
     expect(nc_close(file) == NC_NOERR, "close NetCDF output");
     std::filesystem::remove(path);
 }
 #endif
 
 #ifdef EQUILIBRIUM_HAVE_HDF5
-void test_hdf5_output(bool lasym,
-                      bool tracing,
-                      bool magnetic_fields = false,
-                      bool surface_profiles = false,
-                      bool flux_list = false) {
+void test_hdf5_output(bool lasym, bool flux_list) {
     const auto path = std::filesystem::current_path() /
                       "magnetic-coordinate-boozer-output.h5";
     auto original = lasym ? make_asymmetric_result() : make_result();
-    if (tracing) original = with_tracing(std::move(original));
-    if (magnetic_fields) with_magnetic(original);
-    if (surface_profiles) with_profiles(original);
     if (flux_list) {
         original.tracing->pflux_type = "list";
         original.tracing->aphi = {1, 2, 1};
@@ -760,15 +757,13 @@ void test_hdf5_output(bool lasym,
     const hid_t file =
         H5Fopen(path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
     expect(file >= 0, "open HDF5 output");
-    if (surface_profiles) {
+    {
         const hid_t attribute = H5Aopen(file, "schema", H5P_DEFAULT);
         const hid_t schema_type = H5Aget_type(attribute);
         char schema[64] = {};
         expect(attribute >= 0 && schema_type >= 0 &&
                    H5Aread(attribute, schema_type, schema) >= 0 &&
-                   std::string(schema) ==
-                       (flux_list ? "magnetic-coordinate-boozer-v8"
-                                  : "magnetic-coordinate-boozer-v7"),
+                   std::string(schema) == "magnetic-coordinate-boozer-v8",
                "HDF5 v7 schema");
         H5Tclose(schema_type);
         H5Aclose(attribute);
@@ -832,7 +827,7 @@ void test_hdf5_output(bool lasym,
             H5Dclose(extra);
         }
     }
-    if (tracing) {
+    {
         const hid_t flux_attribute = H5Aopen(file, "phiedge", H5P_DEFAULT);
         double phiedge = 0.0;
         expect(flux_attribute >= 0 &&
@@ -843,9 +838,9 @@ void test_hdf5_output(bool lasym,
         for (const auto& [name, expected] : tracing_arrays(original)) {
             const hid_t array = H5Dopen2(file, name, H5P_DEFAULT);
             expect(array >= 0, name);
-            if (surface_profiles && (std::string(name) == "pressure" ||
-                                     std::string(name) == "current_i" ||
-                                     std::string(name) == "current_g")) {
+            if ((std::string(name) == "pressure" ||
+                 std::string(name) == "current_i" ||
+                 std::string(name) == "current_g")) {
                 const hid_t attribute = H5Aopen(array, "units", H5P_DEFAULT);
                 const hid_t units_type = H5Aget_type(attribute);
                 char units[8] = {};
@@ -884,9 +879,6 @@ void test_hdf5_output(bool lasym,
             H5Dclose(array);
         }
     }
-    if (!surface_profiles)
-        expect(H5Lexists(file, "pressure", H5P_DEFAULT) == 0,
-               "legacy HDF5 must not invent pressure");
     H5Fclose(file);
     std::filesystem::remove(path);
 }
@@ -995,7 +987,7 @@ void test_publication_and_conversion() {
                "writer removed another temporary file");
         no_temporary();
         if (format == equilibrium::BoozerOutputFormat::BINARY) {
-            const auto converted = equilibrium::read_boozer_binary(path);
+            const auto converted = read_complete_boozer(path);
             expect(converted.source_path == "original-source.bin" &&
                        converted.result.grid.b == result.grid.b,
                    "conversion lost source path or field values");
@@ -1109,8 +1101,16 @@ void test_selected_reads() {
             invalid[profile_offset + j] =
                 static_cast<char>(UINT64_C(0x7ff8000000000000) >> (8 * j));
         put_bytes(invalid);
-        options.groups[G::TRACING] = R::REQUIRED;
-        options.groups[G::MAGNETIC] = R::REQUIRED;
+        const auto destination = path.string() + ".converted.bin";
+        std::ofstream(destination) << "preserve";
+        expect(!convert(path.string(), destination),
+               "conversion discarded malformed optional pressure");
+        std::ifstream preserved(destination);
+        std::string contents{std::istreambuf_iterator<char>(preserved), {}};
+        expect(contents == "preserve", "failed conversion replaced output");
+        std::filesystem::remove(destination);
+        options.request[G::TRACING] = R::REQUIRED;
+        options.request[G::MAGNETIC] = R::REQUIRED;
         auto loaded = read_boozer_binary(path, options);
         expect(
             !loaded.result.has_profiles() && loaded.result.has_tracing() &&
@@ -1119,9 +1119,9 @@ void test_selected_reads() {
                     A::PARTIAL &&
                 !loaded.result.read_diagnostics[G::PROFILES].diagnostic.empty(),
             "invalid optional profiles affected required tracing");
-        options.groups[G::PROFILES] = R::REQUIRED;
+        options.request[G::PROFILES] = R::REQUIRED;
         expect(fails(options), "invalid required profiles accepted");
-        options.groups[G::PROFILES] = R::IGNORED;
+        options.request[G::PROFILES] = R::IGNORED;
         loaded = read_boozer_binary(path, options);
         expect(!loaded.result.has_profiles() &&
                    loaded.result.read_diagnostics[G::PROFILES].availability ==
@@ -1135,47 +1135,55 @@ void test_selected_reads() {
         const auto phiedge = invalid.find(suffix) + suffix.size() + 4;
         invalid.replace(phiedge, 8, 8, '\0');
         put_bytes(invalid);
-        options.groups[G::TRACING] = R::OPTIONAL;
+        options.request[G::TRACING] = R::OPTIONAL;
         loaded = read_boozer_binary(path, options);
         expect(!loaded.result.has_tracing() && loaded.result.has_magnetic() &&
                    loaded.result.magnetic_data()->get().fields ==
-                       original.tracing->magnetic->fields &&
+                       original.magnetic->fields &&
                    loaded.result.read_diagnostics[G::TRACING].availability ==
                        A::PARTIAL,
                "optional tracing corrupted independent magnetic group");
-        options.groups[G::TRACING] = R::IGNORED;
+        options.request[G::TRACING] = R::IGNORED;
         loaded = read_boozer_binary(path, options);
         expect(!loaded.result.has_tracing() && loaded.result.has_magnetic(),
                "ignored tracing was exposed");
-        options.groups[G::TRACING] = R::REQUIRED;
+        options.request[G::TRACING] = R::REQUIRED;
         expect(fails(options), "invalid required tracing accepted");
 
         put_bytes(encoded.substr(0, profile_offset + 1));
-        options.groups[G::PROFILES] = R::OPTIONAL;
+        options.request[G::PROFILES] = R::OPTIONAL;
         expect(fails(options),
                "truncated profiles hid required trailing flux kind");
-        options.groups[G::TRACING] = R::IGNORED;
+        options.request[G::TRACING] = R::IGNORED;
         loaded = read_boozer_binary(path, options);
         expect(loaded.result.has_magnetic() && !loaded.result.has_profiles() &&
                    loaded.result.read_diagnostics[G::PROFILES].availability ==
                        A::INVALID,
                "truncated optional last group rejected usable data");
         put_bytes(encoded);
-        options.groups[G::GEOMETRY] = R::IGNORED;
+        options.request[G::GEOMETRY] = R::IGNORED;
         loaded = read_boozer_binary(path, options);
         expect(!loaded.result.has_geometry() && loaded.result.has_magnetic(),
                "ignored geometry materialized");
     }
-    auto legacy = make_result();
-    write_boozer_binary(path, legacy, "legacy");
-    BoozerReadOptions options;
-    auto loaded = read_boozer_binary(path, options);
-    expect(!loaded.result.has_profiles() &&
-               loaded.result.read_diagnostics[G::PROFILES].availability ==
-                   A::ABSENT,
-           "absent profiles reported incorrectly");
-    options.groups[G::MAGNETIC] = R::REQUIRED;
-    expect(fails(options), "missing required magnetic data accepted");
+    write_boozer_binary(path, make_result(), "version-gate");
+    const auto current = saved_bytes();
+    for (int version = 1; version <= 9; ++version) {
+        if (version == 7 || version == 8) continue;
+        auto old = current;
+        old[7] = static_cast<char>('0' + version);
+        old[8] = static_cast<char>(version);
+        put_bytes(old);
+        expect(fails({}), "unsupported Boozer version accepted");
+    }
+    auto previous = current.substr(0, current.size() - 16);
+    previous[7] = '7';
+    previous[8] = 7;
+    put_bytes(previous);
+    auto loaded = read_complete_boozer(path);
+    expect(loaded.result.tracing->pflux_type == "power_series" &&
+               loaded.result.has_profiles(),
+           "v7 records not decoded");
     std::filesystem::remove(path);
 }
 
@@ -1231,13 +1239,13 @@ void test_quantity_reads() {
     };
     put(corrupt);
     BoozerReadOptions options;
-    options.groups = {};
+    options.request = {};
     for (auto q :
          {Q::GEOMETRY, Q::ROTATIONAL_TRANSFORM, Q::FLUX_DERIVATIVES,
           Q::MAGNETIC_JACOBIAN, Q::CONTRAVARIANT_FIELD, Q::COVARIANT_FIELD,
           Q::TOROIDAL_SHIFT, Q::B2_JACOBIAN, Q::SURFACE_CURRENTS})
-        options.groups[q] = R::REQUIRED;
-    options.groups[Q::PRESSURE] = R::OPTIONAL;
+        options.request[q] = R::REQUIRED;
+    options.request[Q::PRESSURE] = R::OPTIONAL;
     for (auto storage : {SpectrumStorage::REAL, SpectrumStorage::COMPLEX,
                          SpectrumStorage::BOTH}) {
         options.spectrum = storage;
@@ -1266,8 +1274,7 @@ void test_quantity_reads() {
                "ignored quantities allocated numerical arrays");
         const auto field = data.contravariant_field().value();
         expect(
-            field.components[0].data() ==
-                    data.tracing->magnetic->fields[1].data() &&
+            field.components[0].data() == data.magnetic->fields[1].data() &&
                 field.grid.index(1, 2, 3) ==
                     static_cast<std::size_t>(
                         (original.grid.nzeta + 3) * original.grid.ntheta + 2),
@@ -1298,17 +1305,17 @@ void test_quantity_reads() {
     }
     nan(corrupt, start + surfaces * 8);
     put(corrupt);
-    options.groups[Q::ROTATIONAL_TRANSFORM] = R::IGNORED;
+    options.request[Q::ROTATIONAL_TRANSFORM] = R::IGNORED;
     auto loaded = read_boozer_binary(path, options);
     expect(loaded.result.iota.empty() && loaded.result.surface_currents(),
            "ignored invalid iota blocked independent quantities");
-    options.groups[Q::ROTATIONAL_TRANSFORM] = R::OPTIONAL;
+    options.request[Q::ROTATIONAL_TRANSFORM] = R::OPTIONAL;
     loaded = read_boozer_binary(path, options);
     expect(loaded.result.iota.empty() && loaded.result.surface_currents() &&
                loaded.result.read_diagnostics[Q::ROTATIONAL_TRANSFORM]
                        .availability == Availability::INVALID,
            "optional invalid iota blocked independent quantities");
-    options.groups[Q::ROTATIONAL_TRANSFORM] = R::REQUIRED;
+    options.request[Q::ROTATIONAL_TRANSFORM] = R::REQUIRED;
     bool failed = false;
     try {
         read_boozer_binary(path, options);
@@ -1328,7 +1335,7 @@ void test_quantity_reads() {
     } catch (const std::invalid_argument&) { failed = true; }
     expect(failed, "writer emitted missing real mode arrays");
     auto vectors = original;
-    auto& f = vectors.tracing->magnetic->fields;
+    auto& f = vectors.magnetic->fields;
     f[0].clear();
     for (int c = 1; c <= 3; ++c)
         for (std::size_t i = 0; i < f[c].size(); ++i) f[c + 3][i] = -f[c][i];
@@ -1339,49 +1346,55 @@ void test_quantity_reads() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 3 && std::string(argv[1]) == "--write-fixtures") {
+            const std::filesystem::path directory(argv[2]);
+            std::filesystem::create_directories(directory);
+            for (bool lasym : {false, true})
+                for (bool list : {false, true}) {
+                    auto data =
+                        lasym ? make_asymmetric_result() : make_result();
+                    if (list) {
+                        data.tracing->pflux_type = "list";
+                        data.tracing->aphi = {1, 2, 1};
+                    }
+                    const std::string stem =
+                        std::string(lasym ? "asymmetric" : "symmetric") +
+                        (list ? "-list" : "-power_series");
+                    for (auto format : {equilibrium::BoozerOutputFormat::BINARY,
+                                        equilibrium::BoozerOutputFormat::NETCDF,
+                                        equilibrium::BoozerOutputFormat::HDF5})
+                        if (equilibrium::boozer_output_format_available(format))
+                            equilibrium::write_boozer_output(
+                                directory /
+                                    (stem +
+                                     std::string(
+                                         equilibrium::boozer_output_suffix(
+                                             format))),
+                                data, "source-version-8.bin");
+                }
+            return 0;
+        }
         test_selected_reads();
         test_quantity_reads();
         test_round_trip();
         test_flux_list_round_trip();
-        for (bool magnetic_fields : {false, true}) {
-            test_tracing_round_trip(false, magnetic_fields);
-            test_tracing_round_trip(true, magnetic_fields);
-        }
-        test_tracing_round_trip(false, true, true);
-        test_tracing_round_trip(true, true, true);
+        test_tracing_round_trip(false);
+        test_tracing_round_trip(true);
         test_asymmetric_round_trip();
         test_nontrivial_real_parity_round_trip();
         test_dispatch();
         test_publication_and_conversion();
 #ifdef EQUILIBRIUM_HAVE_NETCDF
-        for (bool tracing : {false, true}) {
-            test_netcdf_output(false, tracing);
-            test_netcdf_output(true, tracing);
-            if (tracing) {
-                test_netcdf_output(false, tracing, true);
-                test_netcdf_output(true, tracing, true);
-                test_netcdf_output(false, tracing, true, true);
-                test_netcdf_output(true, tracing, true, true);
-                test_netcdf_output(false, tracing, true, true, true);
-                test_netcdf_output(true, tracing, true, true, true);
-            }
-        }
+        for (bool lasym : {false, true})
+            for (bool flux_list : {false, true})
+                test_netcdf_output(lasym, flux_list);
 #endif
 #ifdef EQUILIBRIUM_HAVE_HDF5
-        for (bool tracing : {false, true}) {
-            test_hdf5_output(false, tracing);
-            test_hdf5_output(true, tracing);
-            if (tracing) {
-                test_hdf5_output(false, tracing, true);
-                test_hdf5_output(true, tracing, true);
-                test_hdf5_output(false, tracing, true, true);
-                test_hdf5_output(true, tracing, true, true);
-                test_hdf5_output(false, tracing, true, true, true);
-                test_hdf5_output(true, tracing, true, true, true);
-            }
-        }
+        for (bool lasym : {false, true})
+            for (bool flux_list : {false, true})
+                test_hdf5_output(lasym, flux_list);
 #endif
     } catch (const std::exception& error) {
         std::cerr << "boozer_binary_test: " << error.what() << '\n';

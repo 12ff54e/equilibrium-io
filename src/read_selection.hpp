@@ -31,8 +31,7 @@ inline void drop_quantity(Equilibrium& owner, Quantity q) {
 
 class ReadSelection {
    public:
-    explicit ReadSelection(const ReadRequest& request, bool strict = false)
-        : request_(request), strict_(strict) {}
+    explicit ReadSelection(const ReadRequest& request) : request_(request) {}
 
     bool wants(Quantity q) const { return request_[q] != Requirement::IGNORED; }
     bool wants(DataGroup group) const {
@@ -49,8 +48,6 @@ class ReadSelection {
                               : present      ? Availability::AVAILABLE
                                              : Availability::ABSENT;
         status.diagnostic = error;
-        if (strict_ && status.availability == Availability::INVALID)
-            throw std::invalid_argument(error);
         if (request_[q] == Requirement::REQUIRED && !available(q))
             throw std::runtime_error(
                 std::string(quantity_name(q)) + ": " +
@@ -183,42 +180,10 @@ class ReadSelection {
 
    private:
     const ReadRequest& request_;
-    bool strict_;
 };
 
 Result<Equilibrium> read_native_binary(const std::string& path,
-                                       const ReadRequest& request,
-                                       bool strict = false);
-
-inline ReadRequest legacy_request(bool metadata) {
-    ReadRequest request;
-    request[DataGroup::GEOMETRY] = Requirement::REQUIRED;
-    request[DataGroup::FIELDS] = Requirement::OPTIONAL;
-    if (metadata) {
-        request[DataGroup::GRID] = Requirement::OPTIONAL;
-        request[DataGroup::INPUT] = Requirement::OPTIONAL;
-        request[DataGroup::PROVENANCE] = Requirement::OPTIONAL;
-    }
-    return request;
-}
-
-inline EquilibriumSnapshot take_snapshot(Equilibrium owner) {
-    EquilibriumSnapshot state;
-    state.ns = owner.ns;
-    state.mnmax = owner.mnmax;
-    state.source_version = owner.source.version;
-    state.source_checkpoint = owner.source.checkpoint;
-    const bool lasym = owner.lasym();
-    state.families = std::move(owner.families);
-    if (!lasym && state.families.size() == 12) state.families.resize(6);
-    if (owner.fields) {
-        state.ntheta = owner.fields->ntheta;
-        state.nzeta = owner.fields->nzeta;
-        state.half_fields = std::move(owner.fields->half);
-        state.full_fields = std::move(owner.fields->full);
-    }
-    return state;
-}
+                                       const ReadRequest& request);
 
 struct ContainerReadSelection {
     ReadSelection selection;

@@ -1,5 +1,6 @@
 // Typed asymmetric input provenance, including large and empty harmonic lists.
 // Manufactured host state keeps this serialization gate independent of a GPU.
+#include "equilibrium/binary.hpp"
 #include "equilibrium/checkpoint.hpp"
 #include "equilibrium/reader.hpp"
 #include "equilibrium/writer.hpp"
@@ -83,12 +84,31 @@ static void check_version(const fs::path& path, int expected) {
 
 [[maybe_unused]] static void check_rejected(const fs::path& path,
                                             OutputFormat format) {
-    RunReport report;
-    report.total_effective_iterations = 99;
-    auto result = make_reader(format)->read(path.string(), std::ref(report));
+    auto result = make_reader(format)->read(
+        path.string(), equilibrium::test::complete_request());
     check(!result.has_value(), "partial complementary input is rejected");
-    check(report.total_effective_iterations == 99,
-          "failed container read preserves the caller's report");
+}
+
+void check_previous_version(const fs::path& current, int version, bool lasym) {
+    std::ifstream input(current, std::ios::binary);
+    std::string bytes{std::istreambuf_iterator<char>(input), {}};
+    // Latest schemas append a 4-byte length and "power_series".
+    bytes.resize(bytes.size() - 16);
+    // Previous schemas always included the extension, including empty
+    // complementary vectors for symmetric state.
+    if (!lasym) bytes.append(13 * 4, '\0');
+    bytes[8] = static_cast<char>(version);
+    const auto path = current.string() + ".previous";
+    std::ofstream(path, std::ios::binary).write(bytes.data(), bytes.size());
+    const auto request = equilibrium::test::complete_request(version == 8);
+    auto expected = read_binary(current.string(), request);
+    auto actual = read_binary(path, request);
+    check(expected && actual &&
+              expected.value().families == actual.value().families &&
+              expected.value().input == actual.value().input,
+          "previous version preserves full input and state");
+    if (!actual) std::cerr << actual.error() << '\n';
+    fs::remove(path);
 }
 
 static void run_case(const fs::path& directory, bool empty) {
@@ -129,8 +149,9 @@ static void run_case(const fs::path& directory, bool empty) {
             continue;
         }
         RunReport restored;
-        auto result =
-            make_reader(format)->read(path.string(), std::ref(restored));
+        auto result = make_reader(format)->read(
+            path.string(), equilibrium::test::complete_request());
+        if (result) restored = equilibrium::test::report_from(result.value());
         check(result.has_value(), "read typed asymmetric input");
         if (result.has_value()) {
             check(result.value().families == snapshot.families,
@@ -141,7 +162,8 @@ static void run_case(const fs::path& directory, bool empty) {
             std::cerr << result.error() << '\n';
         }
         if (format == OutputFormat::BINARY) {
-            check_version(path, 10);
+            check_version(path, 11);
+            check_previous_version(path, 10, true);
             const auto obsolete = directory / "obsolete.bin";
             fs::copy_file(path, obsolete, fs::copy_options::overwrite_existing);
             {
@@ -153,9 +175,11 @@ static void run_case(const fs::path& directory, bool empty) {
                            sizeof(version));
             }
             check_rejected(obsolete, format);
-            check(make_reader(format)->read(obsolete.string()).has_value(),
-                  "old asymmetric state remains readable without JSON "
-                  "provenance");
+            check(!make_reader(format)
+                       ->read(obsolete.string(),
+                              equilibrium::test::state_request())
+                       .has_value(),
+                  "obsolete asymmetric state is rejected");
             fs::remove(obsolete);
         }
 #ifdef EQUILIBRIUM_HAVE_HDF5
@@ -207,29 +231,37 @@ static void run_case(const fs::path& directory, bool empty) {
     check(
         write_checkpoint(as_view(snapshot), params, path.string()).has_value(),
         "write typed asymmetric checkpoint");
-    check_version(path, 8);
+    check_version(path, 9);
+    check_previous_version(path, 8, true);
     InputParams restored;
-    auto result = read_checkpoint(path.string(), std::ref(restored));
+    auto result =
+        read_binary(path.string(), equilibrium::test::complete_request(true));
+    if (result) restored = *result.value().input;
     check(result.has_value() && result.value().families == snapshot.families &&
               restored == params,
           "checkpoint state and typed input round trip");
     const auto corrupt = directory / "corrupt.ckpt";
     fs::copy_file(path, corrupt, fs::copy_options::overwrite_existing);
-    fs::resize_file(corrupt, fs::file_size(corrupt) - sizeof(double));
-    check(!read_checkpoint(corrupt.string(), std::ref(restored)).has_value(),
+    fs::resize_file(corrupt, fs::file_size(corrupt) - 16 - sizeof(double));
+    check(!read_binary(corrupt.string(),
+                       equilibrium::test::complete_request(true))
+               .has_value(),
           "truncated complementary input is rejected");
-    check(read_checkpoint(corrupt.string()).has_value(),
+    check(read_binary(corrupt.string(), equilibrium::test::state_request())
+              .has_value(),
           "state-only restart does not require the input record");
     fs::copy_file(path, corrupt, fs::copy_options::overwrite_existing);
     {
         std::fstream file(corrupt,
                           std::ios::binary | std::ios::in | std::ios::out);
         const std::int32_t count = (1 << 20) + 1;
-        file.seekp(-static_cast<std::streamoff>(4 + 6 * sizeof(double)),
+        file.seekp(-static_cast<std::streamoff>(16 + 4 + 6 * sizeof(double)),
                    std::ios::end);
         file.write(reinterpret_cast<const char*>(&count), sizeof(count));
     }
-    check(!read_checkpoint(corrupt.string(), std::ref(restored)).has_value(),
+    check(!read_binary(corrupt.string(),
+                       equilibrium::test::complete_request(true))
+               .has_value(),
           "oversized complementary vector count is rejected");
     fs::copy_file(path, corrupt, fs::copy_options::overwrite_existing);
     {
@@ -239,10 +271,13 @@ static void run_case(const fs::path& directory, bool empty) {
         file.seekp(8);
         file.write(reinterpret_cast<const char*>(&version), sizeof(version));
     }
-    check(!read_checkpoint(corrupt.string(), std::ref(restored)).has_value(),
+    check(!read_binary(corrupt.string(),
+                       equilibrium::test::complete_request(true))
+               .has_value(),
           "JSON-based checkpoint input version is rejected");
-    check(read_checkpoint(corrupt.string()).has_value(),
-          "old asymmetric checkpoint state remains restartable");
+    check(!read_binary(corrupt.string(), equilibrium::test::state_request())
+               .has_value(),
+          "obsolete checkpoint state is rejected");
     fs::remove(corrupt);
 
     auto input = make_params(true);
@@ -258,12 +293,20 @@ static void run_case(const fs::path& directory, bool empty) {
     check(write_checkpoint(as_view(snapshot), input, symmetric_path.string())
               .has_value(),
           "write symmetric checkpoint after asymmetric input");
-    check_version(symmetric_path, 6);
-    check(
-        read_checkpoint(symmetric_path.string(), std::ref(restored))
-                .has_value() &&
-            restored == input,
-        "reused input record clears complementary fields for symmetric reads");
+    check_version(symmetric_path, 9);
+    check_previous_version(symmetric_path, 8, false);
+    const auto symmetric_result = directory / "symmetric.bin";
+    report.input_params = input;
+    check(make_binary_writer()
+              ->write_atomic(as_view(snapshot), report,
+                             {OutputFormat::BINARY, symmetric_result.string()})
+              .has_value(),
+          "write symmetric result");
+    check_previous_version(symmetric_result, 10, false);
+    const auto symmetric = read_binary(
+        symmetric_path.string(), equilibrium::test::complete_request(true));
+    check(symmetric && symmetric.value().input == input,
+          "symmetric read retains only symmetric input fields");
 }
 
 int main(int argc, char** argv) {

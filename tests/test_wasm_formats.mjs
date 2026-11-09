@@ -74,4 +74,4 @@ for (const kind of [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]) {
     if (output) await writeFile(join(output, kind + '.' + format), converted);
   }
 }
-console.log('PASS: standalone formats, compressed NetCDF-4, exact VMEC state/provenance round trips, asymmetric/free metadata, Boozer v6/v7/v8 exports, cleanup and recovered errors');
+console.log('PASS: standalone formats, compressed NetCDF-4, exact VMEC state/provenance round trips, asymmetric/free metadata, Boozer v8 exports, cleanup and recovered errors');

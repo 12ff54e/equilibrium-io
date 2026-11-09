@@ -4,7 +4,7 @@ import {scientificPayloadRanges, digestScientificPayload} from '../js/binary_pay
 
 globalThis.crypto ??= webcrypto;
 
-function fixture(version = 8, components = 6) {
+function fixture(version = 11, components = 6) {
   const start = version >= 9 ? 24 : 20;
   const stateSize = components * 2 * 1 * 8, fieldSize = 19 * 3 * 2 * 8;
   const bytes = new Uint8Array(start + stateSize + 8 + fieldSize + 16);
@@ -21,7 +21,7 @@ function fixture(version = 8, components = 6) {
   return {bytes, start, stateSize, fieldSize};
 }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-for (const version of [8, 9, 10, 11]) {
+for (const version of [10, 11]) {
   const {bytes, start, stateSize, fieldSize} = fixture(version, version >= 9 ? 12 : 6);
   const ranges = scientificPayloadRanges(bytes);
   assert.equal(ranges.components, version >= 9 ? 12 : 6);
@@ -39,7 +39,7 @@ for (const version of [8, 9, 10, 11]) {
   for (const length of [0, 19, start - 1, start + stateSize - 1, bytes.length - 17])
     assert.throws(() => scientificPayloadRanges(bytes.subarray(0, length)));
 }
-for (const [offset, value] of [[8, 12], [12, 0], [16, -1], [20, 7]]) {
+for (const [offset, value] of [[8, 0], [8, 8], [8, 9], [8, 12], [12, 0], [16, -1], [20, 7]]) {
   const {bytes} = fixture(10, 12);
   new DataView(bytes.buffer).setInt32(offset, value, true);
   assert.throws(() => scientificPayloadRanges(bytes));

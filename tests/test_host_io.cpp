@@ -85,23 +85,6 @@ static RunReport make_report() {
     return r;
 }
 
-static bool snapshots_equal(const EquilibriumSnapshot& a,
-                            const EquilibriumSnapshot& b) {
-    if (a.ns != b.ns || a.mnmax != b.mnmax || a.ntheta != b.ntheta ||
-        a.nzeta != b.nzeta)
-        return false;
-    for (int c = 0; c < 6; ++c) {
-        if (a.families[c] != b.families[c]) return false;
-    }
-    for (int c = 0; c < EquilibriumSnapshot::HALF_FIELD_COUNT; ++c) {
-        if (a.half_fields[c] != b.half_fields[c]) return false;
-    }
-    for (int c = 0; c < EquilibriumSnapshot::FULL_FIELD_COUNT; ++c) {
-        if (a.full_fields[c] != b.full_fields[c]) return false;
-    }
-    return true;
-}
-
 static void test_output_spec() {
     check(equilibrium::output_format_available(OutputFormat::BINARY),
           "output spec: binary always available");
@@ -127,8 +110,8 @@ static void test_v1_round_trip() {
     check(w->write_atomic(equilibrium::as_view(s), make_report(), spec)
               .has_value(),
           "v1: write succeeds");
-    auto back = r->read(spec.path);
-    check(back.has_value() && snapshots_equal(s, back.value()),
+    auto back = r->read(spec.path, equilibrium::test::state_request());
+    check(back.has_value() && equilibrium::test::same_state(s, back.value()),
           "v1: round-trip preserves state");
 
     // Corrupt the magic -> reader rejects.
@@ -139,7 +122,7 @@ static void test_v1_round_trip() {
         f.put('X');
         f.close();
     }
-    auto bad = r->read(spec.path);
+    auto bad = r->read(spec.path, equilibrium::test::state_request());
     check(!bad.has_value(), "v1: bad magic rejected");
     remove(spec.path.c_str());
 }
@@ -171,11 +154,9 @@ static void test_list_profiles_round_trip(bool lasym) {
                              {OutputFormat::BINARY, binary})
               .has_value(),
           "list output: binary write");
-    RunReport decoded;
-    check(equilibrium::make_binary_reader()
-                  ->read(binary, std::ref(decoded))
-                  .has_value() &&
-              decoded.input_params == report.input_params,
+    const auto decoded = equilibrium::make_binary_reader()->read(
+        binary, equilibrium::test::complete_request());
+    check(decoded && decoded.value().input == report.input_params,
           "list output: binary preserves complete input");
     remove(binary.c_str());
     const std::string checkpoint = scratch("list.checkpoint");
@@ -183,10 +164,9 @@ static void test_list_profiles_round_trip(bool lasym) {
                                         checkpoint)
               .has_value(),
           "list output: checkpoint write");
-    equilibrium::InputParams restored;
-    check(equilibrium::read_checkpoint(checkpoint, std::ref(restored))
-                  .has_value() &&
-              restored == report.input_params,
+    const auto restored = equilibrium::read_binary(
+        checkpoint, equilibrium::test::complete_request(true));
+    check(restored && restored.value().input == report.input_params,
           "list output: checkpoint preserves complete input");
     remove(checkpoint.c_str());
 }

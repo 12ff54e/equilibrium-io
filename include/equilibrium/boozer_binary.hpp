@@ -22,33 +22,21 @@ struct BoozerFile {
 enum class SpectrumStorage { REAL, COMPLEX, BOTH };
 
 struct BoozerReadOptions {
-    // Core coordinates/dimensions are always read. All other groups follow
-    // this request. The default requires geometry/strength and requests the
-    // optional tracing, magnetic/maps and surface-profile groups.
-    ReadRequest groups = [] {
-        ReadRequest request;
-        request[DataGroup::GEOMETRY] = Requirement::REQUIRED;
-        request[DataGroup::STRENGTH] = Requirement::REQUIRED;
-        request[Quantity::ROTATIONAL_TRANSFORM] = Requirement::REQUIRED;
-        for (auto group :
-             {DataGroup::TRACING, DataGroup::MAGNETIC, DataGroup::PROFILES})
-            request[group] = Requirement::OPTIONAL;
-        return request;
-    }();
-    SpectrumStorage spectrum = SpectrumStorage::COMPLEX;
+    // Coordinates are mandatory. Mark consumer prerequisites REQUIRED;
+    // optional invalid quantities are omitted with a diagnostic.
+    ReadRequest request = ReadRequest::all();
+    SpectrumStorage spectrum = SpectrumStorage::REAL;
 };
 
-// New transforms write v7 (fields/maps, pressure, I/G), or v8 for flux
-// derivative lists. Legacy results retain their v3-v6 format when rewritten.
-// All versions use uniform theta_b and unchanged alpha=nfp*zeta, with
+// Writers emit v8; readers accept v7/v8. Complete output requires every
+// stored record. Both versions use uniform theta_b and alpha=nfp*zeta, with
 // alpha_b=alpha+nfp*nu; nu is in physical toroidal radians.
 void write_boozer_binary(const std::filesystem::path& path,
                          const BoozerResult& result,
                          const std::filesystem::path& source_path);
 
-BoozerFile read_boozer_binary(const std::filesystem::path& path);
 BoozerFile read_boozer_binary(const std::filesystem::path& path,
-                              const BoozerReadOptions& options);
+                              const BoozerReadOptions& options = {});
 
 }  // namespace equilibrium
 

@@ -16,15 +16,12 @@ struct SpectralPayload {
     std::vector<std::uint8_t> bytes;
 };
 
-// Inspect only the spectral portion of cuMES result binaries (versions 1-11).
+// Inspect only the spectral portion of cuMES result binaries (versions 10/11).
 // These functions accept files without derived fields or provenance. They do
 // not validate the rest of the file or the finiteness of the coefficients.
-// Legacy unversioned files require explicit opt-in and an exact payload size.
 // Checkpoints and scientific containers use read_binary/read instead.
 // The bytes API preserves signed zero and NaN payloads for bitwise comparison.
-Result<SpectralPayload> read_spectral_payload(const std::string& path,
-                                              bool allow_legacy = false);
-Result<EquilibriumSnapshot> read_spectral_state(const std::string& path,
-                                                bool allow_legacy = false);
+Result<SpectralPayload> read_spectral_payload(const std::string& path);
+Result<EquilibriumSnapshot> read_spectral_state(const std::string& path);
 
 }  // namespace equilibrium

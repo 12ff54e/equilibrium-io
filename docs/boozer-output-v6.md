@@ -1,5 +1,9 @@
 # Boozer output format version 6
 
+> Historical schema: current readers reject this file version. This document
+> defines scientific blocks retained by v7/v8. Current API and admission rules
+> are in [File compatibility](compatibility.md).
+
 Version 6 exports all six magnetic-field components in the **Boozer basis**
 `(s, theta_b, zeta_b)`, together with their signed Jacobian and the untruncated
 coordinate map. Magnetic-coordinate performs the basis transformation;

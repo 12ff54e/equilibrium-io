@@ -1,4 +1,4 @@
-"""Read the geometry and field-strength subset of Boozer v3–v8 files.
+"""Read the geometry and field-strength subset of Boozer v7/v8 files.
 
 This is an analysis reader, not a lossless record reader. It returns Fourier
 geometry, iota and |B|. It does not retain optional tracing, magnetic component
@@ -11,9 +11,7 @@ import struct
 import numpy as np
 
 
-MAGIC = b"MCBOOZ03"
-VERSION = 3
-MAGICS = {f"MCBOOZ0{version}".encode(): version for version in range(3, 9)}
+MAGICS = {f"MCBOOZ0{version}".encode(): version for version in range(7, 9)}
 PERIOD = 2.0 * np.pi
 FAMILY_NAMES = (
     "rmncc", "rmnss", "zmnsc", "zmncs", "numnsc", "numncs",
@@ -21,9 +19,8 @@ FAMILY_NAMES = (
 ASYMMETRIC_FAMILY_NAMES = (
     "rmnsc", "rmncs", "zmncc", "zmnss", "numncc", "numnss",
 )
-SCHEMA = "magnetic-coordinate-boozer-v3"
 SCHEMAS = {f"magnetic-coordinate-boozer-v{version}": version
-           for version in range(3, 9)}
+           for version in range(7, 9)}
 COORDINATE_CONVENTION = (
     "mixed-grid-v2: theta_b uniform; alpha=nfp*zeta is the unchanged source "
     "field-period angle; alpha_b=alpha+nfp*nu; nu is in physical toroidal "
@@ -176,7 +173,7 @@ def _load_binary(path):
         (source_format_version, source_ns, source_ntheta, source_nzeta,
          source_mpol, source_ntor, nfp, first_surface, ntheta, nzeta,
          mmax, nmax, radial_order) = header
-        lasym = reader.i32() if version >= 5 else int(version == 4)
+        lasym = reader.i32()
         family_names = _family_names(lasym)
         expected_fourier = (ASYMMETRIC_FOURIER_CONVENTION if lasym
                             else FOURIER_CONVENTION)
@@ -203,35 +200,32 @@ def _load_binary(path):
             surfaces, nzeta, ntheta)
         reader.array("<f8", surfaces * nzeta * ntheta)  # sqrt_g_b
         reader.array("<f8", surfaces)  # b2j00
-        if version >= 5:
-            if reader.string() != TRACING_CONVENTION:
-                raise ValueError(f"error: unsupported Boozer tracing convention in {path}")
-            aphi_count = reader.i32()
-            if not (1 <= aphi_count <= 1 << 20 and radial_order in (2, 4)
-                    and radial_order < source_ns <= 1 << 20
-                    and 0 <= source_ntor <= 1 << 15
-                    and source_ntheta > 0 and source_nzeta > 0):
-                raise ValueError(f"error: invalid Boozer tracing dimensions in {path}")
-            # Plotting uses the non-axis grid. Still check that the required
-            # v5 trailer is complete; field reconstruction uses the library API.
-            count = (1 + aphi_count + 2 * source_ns + 4 * (source_ntor + 1)
-                     + radial_order
-                     + 7 * radial_order * source_ntheta * source_nzeta)
-            if not np.all(np.isfinite(reader.array("<f8", count))):
-                raise ValueError(f"error: non-finite Boozer tracing data in {path}")
-        if version >= 6:
-            if reader.string() != MAGNETIC_CONVENTION:
-                raise ValueError(f"error: unsupported Boozer magnetic convention in {path}")
-            count = 9 * surfaces * ntheta * nzeta
-            if not np.all(np.isfinite(reader.array("<f8", count))):
-                raise ValueError(f"error: non-finite Boozer magnetic data in {path}")
-        if version >= 7:
-            if reader.string() != PROFILE_CONVENTION:
-                raise ValueError(f"error: unsupported Boozer profile convention in {path}")
-            profiles = {name: reader.array("<f8", surfaces)
-                        for name in PROFILE_UNITS}
-            _validate_profiles(profiles, iota, path)
-        if version >= 8 and reader.string() != "list":
+        if reader.string() != TRACING_CONVENTION:
+            raise ValueError(f"error: unsupported Boozer tracing convention in {path}")
+        aphi_count = reader.i32()
+        if not (1 <= aphi_count <= 1 << 20 and radial_order in (2, 4)
+                and radial_order < source_ns <= 1 << 20
+                and 0 <= source_ntor <= 1 << 15
+                and source_ntheta > 0 and source_nzeta > 0):
+            raise ValueError(f"error: invalid Boozer tracing dimensions in {path}")
+        # Plotting uses the non-axis grid. Still check that the required
+        # tracing trailer is complete; field reconstruction uses the library API.
+        count = (1 + aphi_count + 2 * source_ns + 4 * (source_ntor + 1)
+                 + radial_order
+                 + 7 * radial_order * source_ntheta * source_nzeta)
+        if not np.all(np.isfinite(reader.array("<f8", count))):
+            raise ValueError(f"error: non-finite Boozer tracing data in {path}")
+        if reader.string() != MAGNETIC_CONVENTION:
+            raise ValueError(f"error: unsupported Boozer magnetic convention in {path}")
+        count = 9 * surfaces * ntheta * nzeta
+        if not np.all(np.isfinite(reader.array("<f8", count))):
+            raise ValueError(f"error: non-finite Boozer magnetic data in {path}")
+        if reader.string() != PROFILE_CONVENTION:
+            raise ValueError(f"error: unsupported Boozer profile convention in {path}")
+        profiles = {name: reader.array("<f8", surfaces)
+                    for name in PROFILE_UNITS}
+        _validate_profiles(profiles, iota, path)
+        if version == 8 and reader.string() not in ("power_series", "list"):
             raise ValueError(f"error: unsupported Boozer flux profile in {path}")
     finally:
         reader.close()
@@ -256,7 +250,7 @@ def _load_netcdf(path):
             def attr(name):
                 return int(getattr(nc, name))
 
-            lasym = attr("lasym") if version >= 5 else int(version == 4)
+            lasym = attr("lasym")
             source_path = _decode(getattr(nc, "source_path", ""))
             source_ns = attr("source_ns")
             nfp = attr("nfp")
@@ -267,16 +261,15 @@ def _load_netcdf(path):
                       for name in ("s", "iota", "mode_m", "mode_n", "B")}
             families = {name: np.asarray(nc.variables[name][:], dtype=float).copy()
                         for name in _family_names(lasym)}
-            if version >= 7:
-                if _decode(getattr(nc, "profile_convention", "")) != PROFILE_CONVENTION:
-                    raise ValueError(f"error: unsupported Boozer profile convention in {path}")
-                profiles = {}
-                for name, unit in PROFILE_UNITS.items():
-                    variable = nc.variables[name]
-                    if _decode(getattr(variable, "units", "")) != unit:
-                        raise ValueError(f"error: invalid Boozer profile units in {path}")
-                    profiles[name] = np.asarray(variable[:], dtype=float).copy()
-                _validate_profiles(profiles, arrays["iota"], path)
+            if _decode(getattr(nc, "profile_convention", "")) != PROFILE_CONVENTION:
+                raise ValueError(f"error: unsupported Boozer profile convention in {path}")
+            profiles = {}
+            for name, unit in PROFILE_UNITS.items():
+                variable = nc.variables[name]
+                if _decode(getattr(variable, "units", "")) != unit:
+                    raise ValueError(f"error: invalid Boozer profile units in {path}")
+                profiles[name] = np.asarray(variable[:], dtype=float).copy()
+            _validate_profiles(profiles, arrays["iota"], path)
     except OSError as exc:
         raise OSError(f"could not read Boozer file {path}: {exc}") \
             from exc
@@ -295,7 +288,7 @@ def _load_hdf5(path):
             version = SCHEMAS.get(_decode(h5.attrs.get("schema", "")))
             if version is None:
                 raise ValueError(f"error: unsupported Boozer HDF5 schema in {path}")
-            lasym = int(h5.attrs["lasym"]) if version >= 5 else int(version == 4)
+            lasym = int(h5.attrs["lasym"])
             source_path = _decode(h5.attrs.get("source_path", ""))
             source_ns = int(h5.attrs["source_ns"])
             nfp = int(h5.attrs["nfp"])
@@ -309,16 +302,15 @@ def _load_hdf5(path):
             families = {name: np.asarray(h5[name][:], dtype=float)
                         for name in _family_names(lasym)}
             b = np.asarray(h5["B"][:], dtype=float)
-            if version >= 7:
-                if _decode(h5.attrs.get("profile_convention", "")) != PROFILE_CONVENTION:
-                    raise ValueError(f"error: unsupported Boozer profile convention in {path}")
-                profiles = {}
-                for name, unit in PROFILE_UNITS.items():
-                    variable = h5[name]
-                    if _decode(variable.attrs.get("units", "")) != unit:
-                        raise ValueError(f"error: invalid Boozer profile units in {path}")
-                    profiles[name] = np.asarray(variable[:], dtype=float)
-                _validate_profiles(profiles, iota, path)
+            if _decode(h5.attrs.get("profile_convention", "")) != PROFILE_CONVENTION:
+                raise ValueError(f"error: unsupported Boozer profile convention in {path}")
+            profiles = {}
+            for name, unit in PROFILE_UNITS.items():
+                variable = h5[name]
+                if _decode(variable.attrs.get("units", "")) != unit:
+                    raise ValueError(f"error: invalid Boozer profile units in {path}")
+                profiles[name] = np.asarray(variable[:], dtype=float)
+            _validate_profiles(profiles, iota, path)
     except OSError as exc:
         raise OSError(f"could not read Boozer file {path}: {exc}") \
             from exc
@@ -330,7 +322,7 @@ def _validate(data, path):
     surfaces = data.source_ns - data.first_surface
     modes = data.mode_m.size
     if data.nfp < 1 or data.first_surface < 1 or surfaces < 1 or \
-            data.ntheta < 4 or data.nzeta < 1:
+            data.ntheta < 1 or data.nzeta < 1:
         raise ValueError(f"error: invalid Boozer dimensions in {path}")
     if data.s.shape != (surfaces,) or data.iota.shape != (surfaces,) or \
             data.mode_n.shape != (modes,) or data.b.shape != (
@@ -351,7 +343,7 @@ def _validate(data, path):
 
 
 def load_boozer(path):
-    """Read a geometry/|B| subset from a Boozer v3–v8 container.
+    """Read a geometry/|B| subset from a Boozer v7/v8 container.
 
     Binary input needs NumPy; NetCDF and HDF5 input also need scipy and h5py,
     respectively. Malformed data raises ValueError; file errors raise OSError.

@@ -53,11 +53,28 @@ class StateIoTest(unittest.TestCase):
                     self.assertEqual(params["rbs"], rbs)
                     self.assertEqual(params["zbc"], zbc)
 
+    def test_previous_versions_and_symmetry(self):
+        for name, lasym in (("large", True), ("symmetric", False)):
+            for suffix, version in ((".bin", 10), (".ckpt", 8)):
+                source = self.directory / (name + suffix)
+                payload = bytearray(source.read_bytes()[:-16])
+                if not lasym:
+                    payload += bytes(13 * 4)
+                struct.pack_into("<i", payload, 8, version)
+                path = self.directory / ("previous-" + name + suffix)
+                path.write_bytes(payload)
+                with self.subTest(name=name, version=version):
+                    data = load_state(path)
+                    self.assertEqual(len(data[2]), 12 if lasym else 6)
+                    self.assertEqual(data[3]["lasym"], lasym)
+                    self.assertEqual(data[3]["pflux_type"], "power_series")
+                    self.assertEqual(data[3]["rbc"], load_state(source)[3]["rbc"])
+
     def test_flux_selector_extension(self):
         for suffix, version in ((".bin", 11), (".ckpt", 9)):
             payload = bytearray((self.directory / ("large" + suffix)).read_bytes())
             struct.pack_into("<i", payload, 8, version)
-            payload += struct.pack("<i", 4) + b"list"
+            payload = payload[:-16] + struct.pack("<i", 4) + b"list"
             path = self.directory / ("flux-list" + suffix)
             path.write_bytes(payload)
             self.assertEqual(load_state(path)[3]["pflux_type"], "list")
@@ -72,7 +89,7 @@ class StateIoTest(unittest.TestCase):
             struct.pack_into("<i", payload, 8, version)
             path.write_bytes(payload)
             with self.subTest(suffix=suffix), self.assertRaisesRegex(
-                    ValueError, "JSON-based asymmetric input record"):
+                    ValueError, "unsupported"):
                 load_state(path)
 
     def test_partial_hdf5_boundary_is_rejected(self):

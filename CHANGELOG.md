@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Keep only result v10/v11, checkpoint v8/v9, and Boozer v7/v8 reads across
+  C++, Python, and JavaScript. Writers always emit v11/v9/v8 respectively.
+- Remove `ReadMode`, `read_checkpoint`, report out-parameters, unversioned
+  payload reads, and nested Boozer magnetic storage. All C++ reads use
+  quantity requests; no-options reads request all quantities as optional.
+- Default Boozer storage to REAL. Require complete data for v8 writes and
+  reject malformed optional data during conversion.
+
 - Select individual quantities with group assignment presets. Validate optional
   values independently, including pressure versus I/G and R/Z versus spectral
   shifts. Report partial groups without hiding usable members.
@@ -10,7 +18,7 @@
   These APIs use concrete types and do not copy numerical arrays.
 - Add required, optional and ignored group requests for native binary,
   checkpoint, NetCDF, HDF5 and Boozer binary reads, with per-group diagnostics
-  and instance capability queries. Existing no-options reads remain strict.
+  and instance capability queries. No-options reads report optional failures through diagnostics.
 - Retain original real Boozer coefficients with runtime REAL/COMPLEX/BOTH
   selection. REAL reads avoid complex arrays; writers prefer retained real
   values. Optional profiles no longer constrain independent selected groups.

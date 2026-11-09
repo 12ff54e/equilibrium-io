@@ -1,4 +1,4 @@
-// cuMES result binaries v8-v11. The digest excludes headers and provenance.
+// cuMES result binaries v10/v11. The digest excludes headers and provenance.
 function byteView(input) {
   if (ArrayBuffer.isView(input))
     return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
@@ -22,11 +22,11 @@ export function scientificPayloadRanges(input) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const version = view.getInt32(8, true);
   const ns = view.getInt32(12, true), mnmax = view.getInt32(16, true);
-  if (![8, 9, 10, 11].includes(version) || ns < 2 || mnmax < 1)
+  if (![10, 11].includes(version) || ns < 2 || mnmax < 1)
     throw new Error(`Unsupported output shape/version: ${version}/${ns}/${mnmax}`);
-  const start = version >= 9 ? 24 : 20;
+  const start = 24;
   if (bytes.length < start) throw new RangeError('Truncated component count');
-  const components = version >= 9 ? view.getInt32(20, true) : 6;
+  const components = view.getInt32(20, true);
   if (![6, 12].includes(components)) throw new Error('Invalid spectral component count');
   const spectralEnd = start + product(components, ns, mnmax, 8);
   if (!Number.isSafeInteger(spectralEnd + 8) || spectralEnd + 8 > bytes.length)

@@ -36,15 +36,6 @@ static EquilibriumSnapshot make_snapshot(int ns, int mnmax) {
     return s;
 }
 
-static bool snapshots_equal(const EquilibriumSnapshot& a,
-                            const EquilibriumSnapshot& b) {
-    if (a.ns != b.ns || a.mnmax != b.mnmax) return false;
-    for (int c = 0; c < 6; ++c) {
-        if (a.families[c] != b.families[c]) return false;
-    }
-    return true;
-}
-
 // A small but non-trivial embedded input record for the checkpoint trailer.
 static equilibrium::InputParams make_params() {
     equilibrium::InputParams p;
@@ -58,30 +49,33 @@ static equilibrium::InputParams make_params() {
     p.phiedge = 1.0;
     p.am = {1.0};
     p.aphi = {1.0};
+    p.raxis_c = p.zaxis_s = {0.0};
     p.rbc_m = {1, 0};
     p.rbc_n = {0, 0};
     p.rbc_value = {1.0, 2.0};
     p.zbs_m = {1};
     p.zbs_n = {0};
     p.zbs_value = {0.5};
-    p.rbcc = {1.0, 2.0};
+    p.rbcc = {2.0, 1.0};
     p.rbss = {0.0, 0.0};
-    p.zbsc = {0.0, 0.0};
-    p.zbcs = {0.5, 0.0};
+    p.zbsc = {0.0, 0.5};
+    p.zbcs = {0.0, 0.0};
     p.stages.push_back({5, 100, 1e-12});
     return p;
 }
 
 static void test_checkpoint_round_trip() {
-    EquilibriumSnapshot s = make_snapshot(5, 3);
+    EquilibriumSnapshot s = make_snapshot(5, 2);
     const equilibrium::InputParams params = make_params();
     const std::string path = scratch("rt");
     check(equilibrium::write_checkpoint(equilibrium::as_view(s), params, path)
               .has_value(),
           "checkpoint: write succeeds");
     equilibrium::InputParams back_params;
-    auto back = equilibrium::read_checkpoint(path, back_params);
-    check(back.has_value() && snapshots_equal(s, back.value()),
+    auto back = equilibrium::read_binary(
+        path, equilibrium::test::complete_request(true));
+    if (back) back_params = *back.value().input;
+    check(back.has_value() && equilibrium::test::same_state(s, back.value()),
           "checkpoint: round-trip preserves state");
     check(back_params == params,
           "checkpoint: round-trip preserves the input record");
@@ -89,38 +83,19 @@ static void test_checkpoint_round_trip() {
 }
 
 static void test_checkpoint_version_gate() {
-    // The version-2 input record rides after the families: a version-1
-    // checkpoint (no record) stays readable with a default-empty record, and
-    // a version beyond the writer's is rejected.
-    EquilibriumSnapshot s = make_snapshot(4, 2);
-    const std::string path = scratch("vgate");
-    equilibrium::write_checkpoint(equilibrium::as_view(s), make_params(), path);
-    {
-        std::fstream f(path, std::ios::in | std::ios::out | std::ios::binary);
-        f.seekp(8);
-        const std::int32_t v1 = 1;
-        f.write(reinterpret_cast<const char*>(&v1), sizeof(v1));
-        f.close();
-    }
-    {
-        equilibrium::InputParams back_params;
-        auto back = equilibrium::read_checkpoint(path, back_params);
-        check(back.has_value() && snapshots_equal(s, back.value()),
-              "checkpoint: version-1 file still readable");
-        check(back_params == equilibrium::InputParams{},
-              "checkpoint: version-1 record absent (defaults)");
-    }
-    {
-        std::fstream f(path, std::ios::in | std::ios::out | std::ios::binary);
-        f.seekp(8);
-        const std::int32_t unsupported_version = 7;
-        f.write(reinterpret_cast<const char*>(&unsupported_version),
-                sizeof(unsupported_version));
-        f.close();
-    }
-    {
-        auto bad = equilibrium::read_checkpoint(path);
-        check(!bad.has_value(), "checkpoint: unsupported version rejected");
+    const std::string path = scratch("versions");
+    for (int version : {1, 6, 7, 10}) {
+        const auto snapshot = make_snapshot(4, 2);
+        equilibrium::write_checkpoint(equilibrium::as_view(snapshot),
+                                      make_params(), path);
+        std::fstream file(path,
+                          std::ios::in | std::ios::out | std::ios::binary);
+        file.seekp(8);
+        const std::int32_t value = version;
+        file.write(reinterpret_cast<const char*>(&value), sizeof(value));
+        file.close();
+        check(!equilibrium::read_binary(path),
+              "unsupported checkpoint version rejected");
     }
     remove(path.c_str());
 }
@@ -136,7 +111,7 @@ static void test_checkpoint_rejection() {
         f.put('X');
         f.close();
     }
-    auto bad = equilibrium::read_checkpoint(path);
+    auto bad = equilibrium::read_binary(path);
     check(!bad.has_value(), "checkpoint: bad magic rejected");
     remove(path.c_str());
 
@@ -145,7 +120,7 @@ static void test_checkpoint_rejection() {
     FILE* f = fopen(tpath.c_str(), "wb");
     fwrite("CUMECKP1", 1, 8, f);
     fclose(f);
-    auto trunc = equilibrium::read_checkpoint(tpath);
+    auto trunc = equilibrium::read_binary(tpath);
     check(!trunc.has_value(), "checkpoint: truncated header rejected");
     remove(tpath.c_str());
 }
@@ -160,15 +135,17 @@ static void test_checkpoint_corrupt_huge_dimensions() {
     {
         FILE* f = fopen(path.c_str(), "wb");
         fwrite("CUMECKP1", 1, 8, f);
-        const std::int32_t version = 1, precision = 0;
+        const std::int32_t version = 9, precision = 0;
         const std::int32_t ns = 2147483647, mnmax = 95000000;
         fwrite(&version, sizeof(version), 1, f);
         fwrite(&precision, sizeof(precision), 1, f);
         fwrite(&ns, sizeof(ns), 1, f);
         fwrite(&mnmax, sizeof(mnmax), 1, f);
+        const std::int32_t components = 6;
+        fwrite(&components, sizeof(components), 1, f);
         fclose(f);
     }
-    auto got = equilibrium::read_checkpoint(path);
+    auto got = equilibrium::read_binary(path);
     check(!got.has_value(),
           "checkpoint: huge ns*mnmax rejected as implausible (no "
           "bad_alloc/terminate)");

@@ -111,7 +111,7 @@ void equilibrium_fixture(int kind) {
     if (!status) throw std::runtime_error(status.error());
 }
 
-void boozer_fixture(bool lasym, bool with_profiles, bool flux_list) {
+void boozer_fixture(bool lasym, bool flux_list) {
     using namespace equilibrium;
     BoozerResult result;
     result.lasym = lasym;
@@ -170,9 +170,9 @@ void boozer_fixture(bool lasym, bool with_profiles, bool flux_list) {
     tracing.axis_z_sin = {0, 0.03};
     tracing.axis_half_s = {0.25, 0.75};
     for (auto& field : tracing.axis_half_fields) field.assign(2 * 8 * 6, -2.5);
-    auto& magnetic = tracing.magnetic.emplace();
+    auto& magnetic = result.magnetic.emplace();
     for (auto& field : magnetic.fields) field.assign(32, -1.5);
-    if (with_profiles) {
+    {
         auto& profiles = result.profiles.emplace();
         profiles.pressure = {125000.0, 0.0};
         profiles.current_i = {1.25, 2.5};
@@ -193,8 +193,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int equilibrium_test_format_fixture(int kind) {
         if (kind < 4 || kind == 6 || kind == 9 || kind == 10)
             equilibrium_fixture(kind);
         else
-            boozer_fixture(kind == 5 || kind == 8 || kind == 12, kind >= 7,
-                           kind >= 11);
+            boozer_fixture(kind == 5 || kind == 8 || kind == 12, kind >= 11);
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());

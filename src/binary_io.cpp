@@ -11,27 +11,6 @@
 namespace equilibrium {
 namespace io_detail {
 
-Result<Equilibrium> read_record(Reader& reader,
-                                const std::string& path,
-                                OutputFormat format,
-                                ReadMode mode) {
-    RunReport report;
-    auto state = reader.read(path, mode == ReadMode::COMPLETE
-                                       ? std::optional(std::ref(report))
-                                       : std::nullopt);
-    if (!state) return Result<Equilibrium>(state.error());
-    auto owner = take_equilibrium(std::move(state.value()));
-    owner.source.format = format;
-    if (mode == ReadMode::COMPLETE) {
-        owner.grid = grid_metadata(report.input_params);
-        owner.input = std::move(report.input_params);
-        owner.provenance = std::move(static_cast<RunProvenance&>(report));
-    }
-    auto status = validate(as_view(owner));
-    if (!status) return Result<Equilibrium>(status.error());
-    return owner;
-}
-
 Status write_record(Writer& writer,
                     const OutputSpec& output,
                     const EquilibriumView& view,
@@ -51,33 +30,6 @@ Status write_record(Writer& writer,
 }
 
 }  // namespace io_detail
-
-Result<Equilibrium> read_binary(const std::string& path, ReadMode mode) {
-    std::ifstream file(path, std::ios::binary);
-    std::array<char, 8> magic{};
-    file.read(magic.data(), magic.size());
-    if (!file)
-        return Result<Equilibrium>("missing or truncated input: " + path);
-    file.close();
-    if (std::string_view(magic.data(), magic.size()) == "CUMECKP1") {
-        InputParams input;
-        auto state = read_checkpoint(path, mode == ReadMode::COMPLETE
-                                               ? std::optional(std::ref(input))
-                                               : std::nullopt);
-        if (!state) return Result<Equilibrium>(state.error());
-        auto owner = take_equilibrium(std::move(state.value()));
-        owner.source.format = OutputFormat::BINARY;
-        if (mode == ReadMode::COMPLETE) {
-            owner.grid = grid_metadata(input);
-            owner.input = std::move(input);
-        }
-        auto status = validate(as_view(owner));
-        if (!status) return Result<Equilibrium>(status.error());
-        return owner;
-    }
-    return io_detail::read_record(*make_binary_reader(), path,
-                                  OutputFormat::BINARY, mode);
-}
 
 Result<Equilibrium> read_binary(const std::string& path,
                                 const ReadRequest& request) {

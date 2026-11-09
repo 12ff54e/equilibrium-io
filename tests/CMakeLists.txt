@@ -91,7 +91,8 @@ if(EQUILIBRIUM_PYTHON_TESTS)
       PYTHONPATH=${PROJECT_SOURCE_DIR}/python
       PYTHONPYCACHEPREFIX=${CMAKE_CURRENT_BINARY_DIR}/pycache
       TMPDIR=${CMAKE_CURRENT_BINARY_DIR}
-      ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/test_boozer_io.py)
+      ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/test_boozer_io.py
+      $<TARGET_FILE:equilibrium_boozer_io>)
   add_test(NAME equilibrium_python
     COMMAND ${CMAKE_COMMAND} -E env
       PYTHONPATH=${PROJECT_SOURCE_DIR}/python

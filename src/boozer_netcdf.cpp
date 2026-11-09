@@ -173,17 +173,8 @@ void write_boozer_netcdf(const std::filesystem::path& path,
                 nc_put_att_double(file, NC_GLOBAL, name, NC_DOUBLE, 1, &value),
                 std::string("write attribute ") + name);
         };
-        const bool has_flux_type =
-            result.tracing && result.tracing->pflux_type == "list";
-        const bool has_magnetic = result.tracing && result.tracing->magnetic;
-        put_text("schema", has_flux_type     ? FLUX_BOOZER_SCHEMA
-                           : result.profiles ? PROFILE_BOOZER_SCHEMA
-                           : has_magnetic    ? MAGNETIC_BOOZER_SCHEMA
-                           : result.tracing  ? TRACING_BOOZER_SCHEMA
-                           : result.lasym    ? ASYMMETRIC_BOOZER_SCHEMA
-                                             : BOOZER_SCHEMA);
-        if (result.tracing || result.lasym)
-            put_int("lasym", result.lasym ? 1 : 0);
+        put_text("schema", BOOZER_SCHEMA);
+        put_int("lasym", result.lasym ? 1 : 0);
         put_text("coordinate_convention", COORDINATE_CONVENTION);
         put_text("fourier_convention", result.lasym
                                            ? ASYMMETRIC_FOURIER_CONVENTION
@@ -205,7 +196,7 @@ void write_boozer_netcdf(const std::filesystem::path& path,
         put_double("resonance_tolerance", result.resonance_tolerance);
 
         std::vector<std::pair<int, std::span<const double>>> tracing_variables;
-        if (result.tracing) {
+        {
             const auto& tracing = *result.tracing;
             put_text("tracing_convention", TRACING_CONVENTION);
             put_double("phiedge", tracing.phiedge);
@@ -252,8 +243,8 @@ void write_boozer_netcdf(const std::filesystem::path& path,
                  ++field)
                 define(AXIS_HALF_FIELD_NAMES[field], native_dims,
                        tracing.axis_half_fields[field]);
-            if (tracing.magnetic) {
-                const auto& magnetic = *tracing.magnetic;
+            {
+                const auto& magnetic = *result.magnetic;
                 put_text("magnetic_convention", MAGNETIC_CONVENTION);
                 for (std::size_t field = 0; field < magnetic.fields.size();
                      ++field)
@@ -265,7 +256,7 @@ void write_boozer_netcdf(const std::filesystem::path& path,
             }
         }
 
-        if (result.profiles) {
+        {
             const auto& profiles = *result.profiles;
             put_text("profile_convention", PROFILE_CONVENTION);
             const auto define = [&](const char* name, const char* units,

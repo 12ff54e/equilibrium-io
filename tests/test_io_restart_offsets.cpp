@@ -299,7 +299,11 @@ static void test_backend(const char* name,
               format("{}: reader factory exists ({})", name, label));
 
         RunReport rep;
-        const auto res = reader->read(path, rep);
+        auto request = state_request();
+        request[equilibrium::DataGroup::PROVENANCE] =
+            equilibrium::Requirement::REQUIRED;
+        const auto res = reader->read(path, request);
+        if (res) rep = report_from(res.value());
         remove(path.c_str());
         if (expect_ok) {
             check(res.has_value(), format("{}: {}", name, label));

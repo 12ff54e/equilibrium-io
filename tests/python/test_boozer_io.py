@@ -3,6 +3,8 @@
 import importlib.util
 from pathlib import Path
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -14,12 +16,36 @@ from boozer_fixture import _manufactured_file
 
 
 class BoozerIoTest(unittest.TestCase):
+    def test_cpp_latest_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run([str(FIXTURE_WRITER), "--write-fixtures", directory],
+                           check=True)
+            for path in Path(directory).iterdir():
+                with self.subTest(path=path.name):
+                    data = load_boozer(path)
+                    self.assertEqual(len(data.families),
+                                     12 if path.stem.startswith("asymmetric") else 6)
+                    np.testing.assert_array_equal(data.s, [.5, 1.0])
+                    np.testing.assert_array_equal(data.iota, [.4, .5])
+                    self.assertEqual(data.source_path, "source-version-8.bin")
+
+    def test_dropped_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "old.bin"
+            _manufactured_file(path, 8)
+            current = path.read_bytes()
+            for version in (3, 4, 5, 6, 9):
+                old = bytearray(current)
+                old[7] = ord(str(version))
+                struct.pack_into("<i", old, 8, version)
+                path.write_bytes(old)
+                with self.subTest(version=version), self.assertRaises(ValueError):
+                    load_boozer(path)
+
     def test_binary_versions_and_symmetry(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "boozer.bin"
-            for version, lasym in ((3, False), (4, True), (5, False), (5, True),
-                                   (6, False), (6, True), (7, False), (7, True),
-                                   (8, False), (8, True)):
+            for version, lasym in ((7, False), (7, True), (8, False), (8, True)):
                 with self.subTest(version=version, lasym=lasym):
                     radius, expected_b = _manufactured_file(path, version, lasym)
                     data = load_boozer(path)
@@ -133,4 +159,5 @@ class BoozerIoTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    FIXTURE_WRITER = Path(sys.argv.pop(1)).resolve()
     unittest.main()

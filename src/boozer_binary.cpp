@@ -3,6 +3,7 @@
 #include "boozer_output_internal.hpp"
 #include "equilibrium/boozer_validation.hpp"
 #include "equilibrium/writer_helpers.hpp"
+#include "format_versions.hpp"
 #include "read_selection.hpp"
 
 #include <array>
@@ -23,29 +24,10 @@
 namespace equilibrium {
 namespace {
 
-constexpr std::array<char, 8> MAGIC{'M', 'C', 'B', 'O', 'O', 'Z', '0', '3'};
-constexpr std::int32_t VERSION = 3;
-constexpr std::array<char, 8> ASYMMETRIC_MAGIC{'M', 'C', 'B', 'O',
-                                               'O', 'Z', '0', '4'};
-constexpr std::int32_t ASYMMETRIC_VERSION = 4;
-constexpr std::array<char, 8> TRACING_MAGIC{'M', 'C', 'B', 'O',
-                                            'O', 'Z', '0', '5'};
-constexpr std::int32_t TRACING_VERSION = 5;
-constexpr std::array<char, 8> MAGNETIC_MAGIC{'M', 'C', 'B', 'O',
-                                             'O', 'Z', '0', '6'};
-constexpr std::int32_t MAGNETIC_VERSION = 6;
-constexpr std::array<char, 8> PROFILE_MAGIC{'M', 'C', 'B', 'O',
-                                            'O', 'Z', '0', '7'};
-constexpr std::int32_t PROFILE_VERSION = 7;
-constexpr std::array<char, 8> FLUX_MAGIC{'M', 'C', 'B', 'O',
-                                         'O', 'Z', '0', '8'};
-constexpr std::int32_t FLUX_VERSION = 8;
-
-std::size_t checked_product(std::size_t left, std::size_t right) {
-    if (left != 0 && right > std::numeric_limits<std::size_t>::max() / left) {
-        throw std::runtime_error("Boozer binary dimension overflow");
-    }
-    return left * right;
+std::size_t checked_product(std::size_t a, std::size_t b) {
+    const auto product = checked_mul(a, b);
+    if (!product) throw std::runtime_error("Boozer dimension product overflow");
+    return *product;
 }
 
 class Writer {
@@ -189,23 +171,10 @@ void write_boozer_binary(const std::filesystem::path& path,
                          const std::filesystem::path& source_path) {
     const boozer_detail::RealBoozerSpectrum spectrum =
         boozer_detail::make_real_spectrum(result);
-    const bool has_flux_type =
-        result.tracing && result.tracing->pflux_type == "list";
-    const bool has_magnetic = result.tracing && result.tracing->magnetic;
     Writer writer(path);
-    const auto& magic = has_flux_type     ? FLUX_MAGIC
-                        : result.profiles ? PROFILE_MAGIC
-                        : has_magnetic    ? MAGNETIC_MAGIC
-                        : result.tracing  ? TRACING_MAGIC
-                        : result.lasym    ? ASYMMETRIC_MAGIC
-                                          : MAGIC;
+    constexpr std::array<char, 8> magic{'M', 'C', 'B', 'O', 'O', 'Z', '0', '8'};
     writer.bytes(magic.data(), magic.size());
-    writer.i32(has_flux_type     ? FLUX_VERSION
-               : result.profiles ? PROFILE_VERSION
-               : has_magnetic    ? MAGNETIC_VERSION
-               : result.tracing  ? TRACING_VERSION
-               : result.lasym    ? ASYMMETRIC_VERSION
-                                 : VERSION);
+    writer.i32(io_detail::BOOZER_VERSION);
     writer.string(boozer_detail::COORDINATE_CONVENTION);
     writer.string(result.lasym ? boozer_detail::ASYMMETRIC_FOURIER_CONVENTION
                                : boozer_detail::FOURIER_CONVENTION);
@@ -223,7 +192,7 @@ void write_boozer_binary(const std::filesystem::path& path,
     writer.i32(spectrum.mmax);
     writer.i32(spectrum.nmax);
     writer.i32(static_cast<std::int32_t>(result.radial_order));
-    if (result.tracing) writer.i32(result.lasym ? 1 : 0);
+    writer.i32(result.lasym ? 1 : 0);
     writer.f64(result.resonance_tolerance);
     writer.doubles(result.s);
     writer.doubles(result.iota);
@@ -246,7 +215,7 @@ void write_boozer_binary(const std::filesystem::path& path,
     writer.doubles(result.grid.b);
     writer.doubles(result.grid.sqrtg_b);
     writer.doubles(result.grid.b2j00);
-    if (result.tracing) {
+    {
         const auto& tracing = *result.tracing;
         writer.string(boozer_detail::TRACING_CONVENTION);
         writer.i32(static_cast<std::int32_t>(tracing.aphi.size()));
@@ -261,44 +230,42 @@ void write_boozer_binary(const std::filesystem::path& path,
         writer.doubles(tracing.axis_half_s);
         for (const auto& field : tracing.axis_half_fields)
             writer.doubles(field);
-        if (tracing.magnetic) {
-            const auto& magnetic = *tracing.magnetic;
+        {
+            const auto& magnetic = *result.magnetic;
             writer.string(boozer_detail::MAGNETIC_CONVENTION);
             for (const auto& field : magnetic.fields) writer.doubles(field);
             writer.doubles(result.grid.source_theta_shift);
             writer.doubles(result.grid.nu);
         }
     }
-    if (result.profiles) {
+    {
         writer.string(boozer_detail::PROFILE_CONVENTION);
         writer.doubles(result.profiles->pressure);
         writer.doubles(result.profiles->current_i);
         writer.doubles(result.profiles->current_g);
     }
-    if (has_flux_type) writer.string(result.tracing->pflux_type);
+    writer.string(result.tracing->pflux_type);
     writer.publish();
 }
 
 namespace {
 BoozerFile read_selected(const std::filesystem::path& path,
-                         const BoozerReadOptions& options,
-                         bool strict) {
-    io_detail::ReadSelection selection(options.groups, strict);
+                         const BoozerReadOptions& options) {
+    io_detail::ReadSelection selection(options.request);
     Reader reader(path);
     std::array<char, 8> magic{};
     reader.bytes(magic.data(), magic.size());
     const int version = reader.i32();
-    bool lasym = magic == ASYMMETRIC_MAGIC && version == ASYMMETRIC_VERSION;
-    const bool has_flux_type = magic == FLUX_MAGIC && version == FLUX_VERSION;
-    const bool has_profiles =
-        has_flux_type || (magic == PROFILE_MAGIC && version == PROFILE_VERSION);
-    const bool has_magnetic = has_profiles || (magic == MAGNETIC_MAGIC &&
-                                               version == MAGNETIC_VERSION);
-    const bool has_tracing =
-        has_magnetic || (magic == TRACING_MAGIC && version == TRACING_VERSION);
-    if (!has_tracing && !lasym && (magic != MAGIC || version != VERSION)) {
-        throw std::runtime_error("unsupported Boozer binary format");
-    }
+    constexpr std::array<char, 8> previous{'M', 'C', 'B', 'O',
+                                           'O', 'Z', '0', '7'};
+    constexpr std::array<char, 8> current{'M', 'C', 'B', 'O',
+                                          'O', 'Z', '0', '8'};
+    if (!io_detail::supported_version(version, io_detail::BOOZER_VERSION) ||
+        magic != (version == io_detail::BOOZER_VERSION ? current : previous))
+        throw std::runtime_error(
+            "unsupported Boozer binary format (expected v7 or v8)");
+    const bool has_flux_type = version == io_detail::BOOZER_VERSION;
+    bool lasym = false;
     if (reader.string() != boozer_detail::COORDINATE_CONVENTION) {
         throw std::runtime_error("unsupported Boozer coordinate convention");
     }
@@ -319,7 +286,7 @@ BoozerFile read_selected(const std::filesystem::path& path,
     result.spectrum.mmax = reader.i32();
     result.spectrum.nmax = reader.i32();
     result.radial_order = static_cast<RadialInterpolationOrder>(reader.i32());
-    if (has_tracing) {
+    {
         const int flag = reader.i32();
         if (flag != 0 && flag != 1)
             throw std::runtime_error("invalid Boozer symmetry flag");
@@ -369,7 +336,6 @@ BoozerFile read_selected(const std::filesystem::path& path,
         try {
             decode();
         } catch (const FramingError& e) {
-            if (strict) throw;
             blocked = errors[static_cast<std::size_t>(q)] = e.what();
         }
     };
@@ -430,11 +396,10 @@ BoozerFile read_selected(const std::filesystem::path& path,
                 for (auto& f : t.axis_half_fields) f.clear();
             }
         }
-        if (result.independent_magnetic)
-            for (std::size_t i = 0;
-                 i < result.independent_magnetic->fields.size(); ++i)
+        if (result.magnetic)
+            for (std::size_t i = 0; i < result.magnetic->fields.size(); ++i)
                 if (half_field_quantity(i) == q)
-                    result.independent_magnetic->fields[i].clear();
+                    result.magnetic->fields[i].clear();
     };
     const auto check = [&](Q q, bool present) {
         std::string reason = errors[static_cast<std::size_t>(q)];
@@ -490,7 +455,7 @@ BoozerFile read_selected(const std::filesystem::path& path,
     doubles(Q::B2_JACOBIAN, result.grid.b2j00, surfaces);
     for (auto q : group_quantities(DataGroup::STRENGTH)) check(q, true);
 
-    if (has_tracing) {
+    {
         BoozerTracingData t;
         std::string convention;
         int aphi_count = 0;
@@ -537,7 +502,7 @@ BoozerFile read_selected(const std::filesystem::path& path,
                 errors[static_cast<std::size_t>(q)] =
                     "unsupported Boozer tracing convention";
     }
-    if (has_magnetic) {
+    {
         std::string convention;
         read_block(Q::MAGNETIC_JACOBIAN, [&] { convention = reader.string(); });
         BoozerMagneticData magnetic;
@@ -549,14 +514,14 @@ BoozerFile read_selected(const std::filesystem::path& path,
         if (selection.wants(Q::MAGNETIC_JACOBIAN) ||
             selection.wants(Q::CONTRAVARIANT_FIELD) ||
             selection.wants(Q::COVARIANT_FIELD))
-            result.independent_magnetic = std::move(magnetic);
+            result.magnetic = std::move(magnetic);
         if (!convention.empty() &&
             convention != boozer_detail::MAGNETIC_CONVENTION)
             for (auto q : group_quantities(DataGroup::MAGNETIC))
                 errors[static_cast<std::size_t>(q)] =
                     "unsupported Boozer magnetic convention";
     }
-    if (has_profiles) {
+    {
         std::string convention;
         read_block(Q::PRESSURE, [&] { convention = reader.string(); });
         BoozerSurfaceProfiles profiles;
@@ -576,9 +541,9 @@ BoozerFile read_selected(const std::filesystem::path& path,
             const auto type = reader.string();
             if (result.tracing) result.tracing->pflux_type = type;
         });
-    for (auto q : group_quantities(DataGroup::TRACING)) check(q, has_tracing);
-    for (auto q : group_quantities(DataGroup::MAGNETIC)) check(q, has_magnetic);
-    for (auto q : group_quantities(DataGroup::PROFILES)) check(q, has_profiles);
+    for (auto q : group_quantities(DataGroup::TRACING)) check(q, true);
+    for (auto q : group_quantities(DataGroup::MAGNETIC)) check(q, true);
+    for (auto q : group_quantities(DataGroup::PROFILES)) check(q, true);
 
     // Validate relations after local checks, so an invalid optional value does
     // not invalidate an independent required quantity. Resolve required-first.
@@ -596,7 +561,6 @@ BoozerFile read_selected(const std::filesystem::path& path,
             if (!available || required != required_pass) continue;
             const auto status = validate_consistency(as_view(result), relation);
             if (!status) {
-                if (strict) throw std::invalid_argument(status.error());
                 selection.conflict(quantities, status.error(), drop);
             }
         }
@@ -609,30 +573,20 @@ BoozerFile read_selected(const std::filesystem::path& path,
             any = any || result.has_quantity(q);
         if (!any) result.tracing.reset();
     }
-    if (result.independent_magnetic) {
+    if (result.magnetic) {
         bool any = false;
-        for (const auto& f : result.independent_magnetic->fields)
-            any = any || !f.empty();
-        if (!any) result.independent_magnetic.reset();
-    }
-    if (result.tracing && result.independent_magnetic) {
-        result.tracing->magnetic = std::move(result.independent_magnetic);
-        result.independent_magnetic.reset();
+        for (const auto& f : result.magnetic->fields) any = any || !f.empty();
+        if (!any) result.magnetic.reset();
     }
     selection.finish();
-    if (strict) validate_boozer_result(result);
     result.read_diagnostics = std::move(selection.diagnostics);
     return file;
 }
 }  // namespace
 
-BoozerFile read_boozer_binary(const std::filesystem::path& path) {
-    return read_selected(path, BoozerReadOptions{}, true);
-}
-
 BoozerFile read_boozer_binary(const std::filesystem::path& path,
                               const BoozerReadOptions& options) {
-    return read_selected(path, options, false);
+    return read_selected(path, options);
 }
 
 }  // namespace equilibrium

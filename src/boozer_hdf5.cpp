@@ -99,25 +99,14 @@ void write_boozer_hdf5(const std::filesystem::path& path,
     const hid_t file = output.get();
     if (file < 0) throw std::runtime_error("HDF5 create image failed");
 
-    const bool has_flux_type =
-        result.tracing && result.tracing->pflux_type == "list";
-    const bool has_magnetic = result.tracing && result.tracing->magnetic;
-    write_string_attribute(file, "schema",
-                           std::string(has_flux_type     ? FLUX_BOOZER_SCHEMA
-                                       : result.profiles ? PROFILE_BOOZER_SCHEMA
-                                       : has_magnetic   ? MAGNETIC_BOOZER_SCHEMA
-                                       : result.tracing ? TRACING_BOOZER_SCHEMA
-                                       : result.lasym ? ASYMMETRIC_BOOZER_SCHEMA
-                                                      : BOOZER_SCHEMA));
+    write_string_attribute(file, "schema", std::string(BOOZER_SCHEMA));
     write_string_attribute(file, "coordinate_convention",
                            std::string(COORDINATE_CONVENTION));
     write_string_attribute(
         file, "fourier_convention",
         std::string(result.lasym ? ASYMMETRIC_FOURIER_CONVENTION
                                  : FOURIER_CONVENTION));
-    if (result.tracing || result.lasym)
-        write_scalar_attribute(file, "lasym", H5T_NATIVE_INT,
-                               result.lasym ? 1 : 0);
+    write_scalar_attribute(file, "lasym", H5T_NATIVE_INT, result.lasym ? 1 : 0);
     write_string_attribute(file, "source_path", source_path.string());
     write_scalar_attribute(file, "source_format_version", H5T_NATIVE_INT,
                            result.source_format_version);
@@ -142,7 +131,7 @@ void write_boozer_hdf5(const std::filesystem::path& path,
     write_scalar_attribute(file, "resonance_tolerance", H5T_NATIVE_DOUBLE,
                            result.resonance_tolerance);
 
-    if (result.tracing) {
+    {
         const auto& tracing = *result.tracing;
         write_string_attribute(file, "tracing_convention",
                                std::string(TRACING_CONVENTION));
@@ -178,8 +167,8 @@ void write_boozer_hdf5(const std::filesystem::path& path,
              ++field)
             write_dataset(file, AXIS_HALF_FIELD_NAMES[field], H5T_NATIVE_DOUBLE,
                           native_dims, tracing.axis_half_fields[field].data());
-        if (tracing.magnetic) {
-            const auto& magnetic = *tracing.magnetic;
+        {
+            const auto& magnetic = *result.magnetic;
             write_string_attribute(file, "magnetic_convention",
                                    std::string(MAGNETIC_CONVENTION));
             const hsize_t map_dims[] = {
@@ -211,7 +200,7 @@ void write_boozer_hdf5(const std::filesystem::path& path,
     write_dataset(file, "s", H5T_NATIVE_DOUBLE, surface_dims, result.s.data());
     write_dataset(file, "iota", H5T_NATIVE_DOUBLE, surface_dims,
                   result.iota.data());
-    if (result.profiles) {
+    {
         const auto& profiles = *result.profiles;
         write_string_attribute(file, "profile_convention",
                                std::string(PROFILE_CONVENTION));

@@ -27,16 +27,6 @@ inline std::filesystem::path reserve_output_path(
 }
 
 inline constexpr std::string_view BOOZER_SCHEMA =
-    "magnetic-coordinate-boozer-v3";
-inline constexpr std::string_view ASYMMETRIC_BOOZER_SCHEMA =
-    "magnetic-coordinate-boozer-v4";
-inline constexpr std::string_view TRACING_BOOZER_SCHEMA =
-    "magnetic-coordinate-boozer-v5";
-inline constexpr std::string_view MAGNETIC_BOOZER_SCHEMA =
-    "magnetic-coordinate-boozer-v6";
-inline constexpr std::string_view PROFILE_BOOZER_SCHEMA =
-    "magnetic-coordinate-boozer-v7";
-inline constexpr std::string_view FLUX_BOOZER_SCHEMA =
     "magnetic-coordinate-boozer-v8";
 inline constexpr std::string_view PROFILE_CONVENTION =
     "surface-profiles-v1: pressure in Pa; B=beta*grad(s)+I*grad(theta_b)"

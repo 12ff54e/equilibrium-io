@@ -3,6 +3,7 @@
 #include "equilibrium/reader.hpp"
 #include "equilibrium/validation.hpp"
 #include "equilibrium/writer.hpp"
+#include "test_support.hpp"
 
 #include <cstdint>
 #ifdef EQUILIBRIUM_HAVE_NETCDF
@@ -122,7 +123,7 @@ void test_requests(const std::filesystem::path& scratch) {
             if (format == eq::OutputFormat::BINARY) {
                 auto data = bytes(path);
                 const auto offset =
-                    provenance ? 20 + 6 * 6 * 8 + 8 + (7 * 16 + 6 * 24) * 8
+                    provenance ? 24 + 6 * 6 * 8 + 8 + (7 * 16 + 6 * 24) * 8
                                : data.find("cumes-config-v1") - 72;
                 data[offset] = 7;
                 data[offset + 1] = data[offset + 2] = data[offset + 3] = 0;
@@ -284,8 +285,8 @@ void test_requests(const std::filesystem::path& scratch) {
             selected[G::FIELDS] = R::REQUIRED;
             require(!eq::read(path, selected),
                     "partial required datasets accepted");
-            require(!eq::make_reader(format)->read(path),
-                    "legacy reader accepted an absent field quantity");
+            require(!eq::make_reader(format)->read(path, selected),
+                    "required field quantity was absent");
         }
 
         if (format != eq::OutputFormat::BINARY) {
@@ -444,7 +445,7 @@ void test_requests(const std::filesystem::path& scratch) {
     auto corrupt = original;
     // First half-grid scalar; encode a quiet NaN independently of host byte
     // order.
-    const std::size_t offset = 20 + 6 * 6 * 8 + 8;
+    const std::size_t offset = 24 + 6 * 6 * 8 + 8;
     for (int j = 0; j < 8; ++j)
         corrupt[offset + j] =
             static_cast<char>(UINT64_C(0x7ff8000000000000) >> (8 * j));
@@ -628,8 +629,9 @@ void test_quantities(const std::filesystem::path& scratch) {
                     !loaded.value().covariant_field() &&
                     loaded.value().contravariant_field()->grid.ntheta == 8,
                 "invalid or conflicting optional field discarded usable peer");
-        require(!eq::make_reader(eq::OutputFormat::HDF5)->read(path),
-                "legacy HDF5 reader accepted inconsistent field grids");
+        selected[eq::DataGroup::FIELDS] = R::REQUIRED;
+        require(!eq::make_reader(eq::OutputFormat::HDF5)->read(path, selected),
+                "required fields accepted inconsistent grids");
     }
 #endif
 }
@@ -688,9 +690,9 @@ int main(int argc, char** argv) {
         require(bool(saved), "complete binary read failed");
         require(!saved.value().profiles && saved.value().fields.has_value(),
                 "decoded field presence changed");
-        require(saved.value().source.version == 8,
+        require(saved.value().source.version == 11,
                 "wrong binary source version");
-        auto state = eq::read(binary, eq::ReadMode::STATE_ONLY);
+        auto state = eq::read(binary, eq::test::state_request());
         require(bool(state) && !state.value().grid && !state.value().input &&
                     !state.value().provenance,
                 "state-only read invented metadata");
@@ -743,22 +745,25 @@ int main(int argc, char** argv) {
         require(!eq::read(unknown), "unknown magic accepted");
         std::ofstream(unknown, std::ios::binary)
             << original.substr(0, original.size() - 3);
-        require(!eq::read(unknown), "truncated provenance accepted");
-        require(bool(eq::read(unknown, eq::ReadMode::STATE_ONLY)),
+        require(!eq::read(unknown, eq::test::complete_request()),
+                "truncated input accepted");
+        require(bool(eq::read(unknown, eq::test::state_request())),
                 "explicit state-only legacy read failed");
         std::ofstream(unknown, std::ios::binary) << original << 'x';
-        require(!eq::read(unknown), "trailing garbage accepted");
+        require(bool(eq::read(unknown, eq::test::complete_request())),
+                "unused trailing data rejected");
         // Header, six spectral families, field dimensions, seven half-grid
         // fields and six full-grid fields precede the provenance tags.
-        const std::size_t trailer = 20 + 6 * 6 * 8 + 8 + (7 * 16 + 6 * 24) * 8;
+        const std::size_t trailer = 24 + 6 * 6 * 8 + 8 + (7 * 16 + 6 * 24) * 8;
         for (auto offset : {trailer, trailer + 4}) {
             auto corrupt = original;
             corrupt[offset] = 0;
             corrupt[offset + 1] = 1;  // 256 must not narrow to CONVERGED.
             std::ofstream(unknown, std::ios::binary)
                 .write(corrupt.data(), corrupt.size());
-            require(!eq::read(unknown), "invalid binary tag accepted");
-            require(bool(eq::read(unknown, eq::ReadMode::STATE_ONLY)),
+            require(!eq::read(unknown, eq::test::complete_request()),
+                    "invalid binary tag accepted");
+            require(bool(eq::read(unknown, eq::test::state_request())),
                     "invalid provenance prevented state-only read");
         }
         std::cout << "equilibrium contracts passed\n";

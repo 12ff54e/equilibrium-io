@@ -12,9 +12,43 @@
 #include <unistd.h>
 
 // Formatting also supports GCC 12, which lacks std::format.
+#include "equilibrium/binary.hpp"
+#include "equilibrium/run_report.hpp"
 #include "test_format.hpp"
 
 namespace equilibrium::test {
+
+inline ReadRequest state_request() {
+    ReadRequest request;
+    request[DataGroup::GEOMETRY] = Requirement::REQUIRED;
+    request[DataGroup::FIELDS] = Requirement::OPTIONAL;
+    return request;
+}
+
+inline ReadRequest complete_request(bool checkpoint = false) {
+    auto request = state_request();
+    request[DataGroup::GRID] = Requirement::REQUIRED;
+    request[DataGroup::INPUT] = Requirement::REQUIRED;
+    if (!checkpoint) request[DataGroup::PROVENANCE] = Requirement::REQUIRED;
+    return request;
+}
+
+inline RunReport report_from(const Equilibrium& owner) {
+    RunReport report;
+    if (owner.input) report.input_params = *owner.input;
+    if (owner.provenance)
+        static_cast<RunProvenance&>(report) = *owner.provenance;
+    return report;
+}
+
+inline bool same_state(const EquilibriumSnapshot& a, const Equilibrium& b) {
+    if (a.ns != b.ns || a.mnmax != b.mnmax || a.families != b.families)
+        return false;
+    if (!a.has_any_derived_fields()) return !b.fields;
+    return b.fields && a.ntheta == b.fields->ntheta &&
+           a.nzeta == b.fields->nzeta && a.half_fields == b.fields->half &&
+           a.full_fields == b.fields->full;
+}
 
 // Each CTest executable has its own working directory in the build tree.
 class TempDir {

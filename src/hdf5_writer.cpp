@@ -546,16 +546,11 @@ class Hdf5V1Writer final : public Writer {
 // ---------------------------------------------------------------------------
 class Hdf5V1Reader final : public Reader {
    public:
-    Result<EquilibriumSnapshot> read(
-        const std::string& path,
-        std::optional<std::reference_wrapper<RunReport>> report) override {
-        return decode(path, report, nullptr);
-    }
     Result<Equilibrium> read(const std::string& path,
                              const ReadRequest& request) override {
         io_detail::ContainerReadSelection selected(request);
         RunReport report;
-        auto state = decode(path, std::ref(report), &selected);
+        auto state = decode(path, report, selected);
         if (!state) return Result<Equilibrium>(state.error());
         return selected.finish(std::move(state.value()), std::move(report),
                                OutputFormat::HDF5);
@@ -564,8 +559,8 @@ class Hdf5V1Reader final : public Reader {
    private:
     Result<EquilibriumSnapshot> decode(
         const std::string& path,
-        std::optional<std::reference_wrapper<RunReport>> report,
-        io_detail::ContainerReadSelection* selected) {
+        RunReport& report,
+        io_detail::ContainerReadSelection& selected) {
         hid_t fid = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
         if (fid < 0) {
             return Result<EquilibriumSnapshot>("HDF5: cannot open " + path);
@@ -768,20 +763,17 @@ class Hdf5V1Reader final : public Reader {
                 return false;
             };
             const auto wants = [&](auto group) {
-                return !selected || selected->selection.wants(group);
+                return selected.selection.wants(group);
             };
             const auto decode_group = [&](auto group, auto present,
                                           auto decode) {
                 if (!wants(group)) return false;
                 const bool exists = present();
                 Status status;
-                if (exists || !selected) status = decode();
-                if (!selected) {
-                    if (!status) throw std::runtime_error(status.error());
-                    return true;
-                }
-                return selected->selection.accept(group, exists,
-                                                  status ? "" : status.error());
+                if (exists) status = decode();
+
+                return selected.selection.accept(group, exists,
+                                                 status ? "" : status.error());
             };
             const auto group_fail = [](const std::string& message) {
                 return Status(message);
@@ -844,16 +836,7 @@ class Hdf5V1Reader final : public Reader {
                         if (native_family_quantity(c) == q)
                             snapshot.families[c].clear();
             }
-            if (!selected) {
-                std::size_t present = 0;
-                for (const auto* name : HALF_FIELD_NAMES)
-                    present += dataset_present(name);
-                for (const auto* name : FULL_FIELD_NAMES)
-                    present += dataset_present(name);
-                if (present && present != std::size(HALF_FIELD_NAMES) +
-                                              std::size(FULL_FIELD_NAMES))
-                    return fail("partial derived-field block");
-            }
+
             for (auto q : group_quantities(DataGroup::FIELDS)) {
                 if (!wants(q)) continue;
                 const bool full = q == Quantity::CURRENT_DENSITY;
@@ -879,10 +862,6 @@ class Hdf5V1Reader final : public Reader {
                                 dims[1] < 1 || dims[2] < 1 ||
                                 dims[1] > INT_MAX || dims[2] > INT_MAX)
                                 return Status("malformed field dimensions");
-                            if (!selected && snapshot.ntheta &&
-                                (snapshot.ntheta != static_cast<int>(dims[2]) ||
-                                 snapshot.nzeta != static_cast<int>(dims[1])))
-                                return Status("inconsistent field grids");
                             snapshot.ntheta = static_cast<int>(dims[2]);
                             snapshot.nzeta = static_cast<int>(dims[1]);
                             for (std::size_t c = 0; c < count; ++c) {
@@ -896,7 +875,7 @@ class Hdf5V1Reader final : public Reader {
                             }
                             return {};
                         })) {
-                    if (selected) selected->record_field_shape(q, snapshot);
+                    selected.record_field_shape(q, snapshot);
                 } else {
                     if (full)
                         for (auto& values : snapshot.full_fields)
@@ -908,7 +887,7 @@ class Hdf5V1Reader final : public Reader {
                                 snapshot.half_fields[c].clear();
                 }
             }
-            if (report) {
+
                 // Parse transactionally: a malformed late field must not leave
                 // a partially populated report visible to the caller.
                 RunReport parsed_report;
@@ -1066,7 +1045,7 @@ class Hdf5V1Reader final : public Reader {
 
                         return {};
                     });
-                if (selected) {
+
                     decode_group(
                         DataGroup::GRID,
                         [&] { return has_metadata(io_detail::GRID_MEMBERS); },
@@ -1079,24 +1058,21 @@ class Hdf5V1Reader final : public Reader {
                                 !get_int_attr("nzeta", grid.nzeta))
                                 return Status(
                                     "missing or malformed grid metadata");
-                            selected->grid = grid;
+                            selected.grid = grid;
                             return {};
                         });
-                }
+
                 decode_group(
                     DataGroup::INPUT,
                     [&] { return has_metadata(io_detail::INPUT_MEMBERS); },
                     [&]() -> Status {
                         auto fail = group_fail;
-                        int input_lasym = !selected && snapshot.lasym() ? 1 : 0;
-                        if (selected) {
-                            const bool present = H5Aexists(fid, "lasym") > 0;
-                            if (present &&
-                                (!get_int_attr("lasym", input_lasym) ||
-                                 (input_lasym != 0 && input_lasym != 1)))
-                                return Status(
-                                    "invalid saved input symmetry tag");
-                        }
+                        int input_lasym = 0;
+
+                        const bool present = H5Aexists(fid, "lasym") > 0;
+                        if (present && (!get_int_attr("lasym", input_lasym) ||
+                                        (input_lasym != 0 && input_lasym != 1)))
+                            return Status("invalid saved input symmetry tag");
 
                         // ---- embedded normalized-input record ----
                         // All-or-nothing: when the mpol attribute exists the
@@ -1392,10 +1368,10 @@ class Hdf5V1Reader final : public Reader {
 
                         return {};
                     });
-                report->get() = std::move(parsed_report);
-            }
-            H5Fclose(fid);
-            return snapshot;
+                report = std::move(parsed_report);
+
+                H5Fclose(fid);
+                return snapshot;
         } catch (const std::bad_alloc&) {
             H5Fclose(fid);
             return Result<EquilibriumSnapshot>(

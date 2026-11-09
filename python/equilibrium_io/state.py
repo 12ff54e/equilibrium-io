@@ -55,29 +55,16 @@ def _read_vec(f, fmt, cap=1 << 20):
     return struct.unpack(f"<{n}{fmt}", f.read(n * struct.calcsize(fmt)))
 
 
-def _read_input_record(f, has_profile_types=False,
-                       has_free_boundary_extension=False,
-                       has_inline_makegrid_extension=False,
-                       has_embedded_makegrid_extension=False,
-                       has_asymmetric_extension=False,
-                       has_flux_extension=False):
-    """The fixed-order embedded-input record (io_common.hpp write/readInput
-    Params): 6 i32 + 8 f64 scalars, schema string, six f64 vectors, the
-    input stages, the raw boundary, four folded vectors (skipped), and the
-    optional free-boundary extension. The combined binary-v8/checkpoint-v6
-    layout also carries profile types, inline-Makegrid paths, and optional
-    embedded parameters."""
+def _read_input_record(f, has_asymmetric_extension, has_flux_extension,
+                       expected_lasym):
+    """Decode the typed input shared by result v10/v11 and checkpoint v8/v9."""
     mpol, ntor, nfp, ntheta, nzeta, ncurr = struct.unpack("<6i", f.read(24))
     (delt, phiedge, pres_scale, adiabatic_index, spres_ped, bloat, curtor,
      tcon0) = struct.unpack("<8d", f.read(64))
     schema = _read_str(f)
-    pmass_type = "power_series"
-    piota_type = "power_series"
-    pcurr_type = "power_series"
-    if has_profile_types:
-        pmass_type = _read_str(f)
-        piota_type = _read_str(f)
-        pcurr_type = _read_str(f)
+    pmass_type = _read_str(f)
+    piota_type = _read_str(f)
+    pcurr_type = _read_str(f)
     am = list(_read_vec(f, "d"))
     ac = list(_read_vec(f, "d"))
     ai = list(_read_vec(f, "d"))
@@ -102,35 +89,30 @@ def _read_input_record(f, has_profile_types=False,
         raise ValueError("error: corrupt boundary vectors in container")
     for _ in range(4):  # folded rbcc/rbss/zbsc/zbcs
         _read_vec(f, "d")
-    lfreeb, nvacskip, mgrid_file, extcur = False, 1, "", []
-    coils_file, makegrid_parameters_file = "", ""
-    if has_free_boundary_extension:
-        lfreeb_i, nvacskip = struct.unpack("<2i", f.read(8))
-        lfreeb = bool(lfreeb_i)
-        mgrid_file = _read_str(f)
-        extcur = list(_read_vec(f, "d"))
-    if has_inline_makegrid_extension:
-        coils_file = _read_str(f)
-        makegrid_parameters_file = _read_str(f)
+    lfreeb_i, nvacskip = struct.unpack("<2i", f.read(8))
+    lfreeb = bool(lfreeb_i)
+    mgrid_file = _read_str(f)
+    extcur = list(_read_vec(f, "d"))
+    coils_file = _read_str(f)
+    makegrid_parameters_file = _read_str(f)
     makegrid_parameters = None
-    if has_embedded_makegrid_extension:
-        present = struct.unpack("<i", f.read(4))[0]
-        if present:
-            normalize, symmetry, nfp_mg = struct.unpack("<3i", f.read(12))
-            r_min, r_max = struct.unpack("<2d", f.read(16))
-            nr = struct.unpack("<i", f.read(4))[0]
-            z_min, z_max = struct.unpack("<2d", f.read(16))
-            nz, nphi = struct.unpack("<2i", f.read(8))
-            makegrid_parameters = {
-                "normalize_by_currents": bool(normalize),
-                "assume_stellarator_symmetry": bool(symmetry),
-                "number_of_field_periods": nfp_mg,
-                "r_grid_minimum": r_min, "r_grid_maximum": r_max,
-                "number_of_r_grid_points": nr,
-                "z_grid_minimum": z_min, "z_grid_maximum": z_max,
-                "number_of_z_grid_points": nz,
-                "number_of_phi_grid_points": nphi,
-            }
+    present = struct.unpack("<i", f.read(4))[0]
+    if present:
+        normalize, symmetry, nfp_mg = struct.unpack("<3i", f.read(12))
+        r_min, r_max = struct.unpack("<2d", f.read(16))
+        nr = struct.unpack("<i", f.read(4))[0]
+        z_min, z_max = struct.unpack("<2d", f.read(16))
+        nz, nphi = struct.unpack("<2i", f.read(8))
+        makegrid_parameters = {
+            "normalize_by_currents": bool(normalize),
+            "assume_stellarator_symmetry": bool(symmetry),
+            "number_of_field_periods": nfp_mg,
+            "r_grid_minimum": r_min, "r_grid_maximum": r_max,
+            "number_of_r_grid_points": nr,
+            "z_grid_minimum": z_min, "z_grid_maximum": z_max,
+            "number_of_z_grid_points": nz,
+            "number_of_phi_grid_points": nphi,
+        }
 
     result = {
         "schema": schema, "mpol": mpol, "ntor": ntor, "nfp": nfp,
@@ -158,10 +140,15 @@ def _read_input_record(f, has_profile_types=False,
         for key in ("rbs", "zbc"):
             for suffix, fmt in (("_m", "i"), ("_n", "i"), ("_value", "d")):
                 arrays[key + suffix] = _read_vec(f, fmt)
-        _asymmetric_input(result, lasym, arrays.__getitem__,
-                          arrays.__getitem__)
+        if lasym != int(expected_lasym):
+            raise ValueError("spectral state and input symmetry disagree")
+        if lasym:
+            _asymmetric_input(result, lasym, arrays.__getitem__, arrays.__getitem__)
+        elif any(len(values) for values in arrays.values()):
+            raise ValueError("symmetric input contains complementary arrays")
+        result["lasym"] = bool(lasym)
         for _ in range(4):  # folded rbsc/rbcs/zbcc/zbss
-            if len(_read_vec(f, "d")) != mpol * (ntor + 1):
+            if len(_read_vec(f, "d")) != (mpol * (ntor + 1) if lasym else 0):
                 raise ValueError("invalid asymmetric folded "
                                  "boundary dimensions")
     result["pflux_type"] = _read_str(f) if has_flux_extension else "power_series"
@@ -175,7 +162,7 @@ def _no_params(path):
 def load_state(path):
     """Load the converged state + the embedded structured input record from
     any supported solver output container: versioned binary
-    (v8/v10), checkpoint (v6/v8), NetCDF, or HDF5. Returns (ns, mnmax, fams,
+    (v10/v11), checkpoint (v8/v9), NetCDF, or HDF5. Returns (ns, mnmax, fams,
     params, name) — the active mode-major families (index = mode * ns +
     surface), the input record as a dict mirroring InputParams, and a
     display name (the recorded input path stem when available, else the
@@ -192,33 +179,27 @@ def load_state(path):
         with open(path, "rb") as f:
             f.seek(8)
             version = struct.unpack("<i", f.read(4))[0]
-            if version == 9:
-                raise ValueError("error: JSON-based asymmetric input record is "
-                                 "no longer supported")
-            if not 1 <= version <= 11:
+            if version not in (10, 11):
                 raise ValueError(f"error: unsupported container version "
                                  f"{version} in {path}")
             ns, mnmax = struct.unpack("<ii", f.read(8))
-            count = struct.unpack("<i", f.read(4))[0] if version >= 9 else 6
+            count = struct.unpack("<i", f.read(4))[0]
             n = ns * mnmax
             fams = {fam: np.frombuffer(f.read(8 * n), dtype="<f8")
                     for fam in _family_names(count)}
-            if version >= 8:
-                ntheta_fields, nzeta_fields = struct.unpack("<2i", f.read(8))
-                if ntheta_fields < 0 or nzeta_fields < 0:
-                    raise ValueError("error: corrupt derived-field dimensions "
+            ntheta_fields, nzeta_fields = struct.unpack("<2i", f.read(8))
+            if ntheta_fields < 0 or nzeta_fields < 0:
+                raise ValueError("error: corrupt derived-field dimensions "
+                                 f"in {path}")
+            if bool(ntheta_fields) != bool(nzeta_fields):
+                raise ValueError("error: incomplete derived-field dimensions "
+                                 f"in {path}")
+            if ntheta_fields:
+                points = ntheta_fields * nzeta_fields
+                field_values = (7 * (ns - 1) + 6 * ns) * points
+                if len(f.read(8 * field_values)) != 8 * field_values:
+                    raise ValueError("error: truncated derived-field block "
                                      f"in {path}")
-                if bool(ntheta_fields) != bool(nzeta_fields):
-                    raise ValueError("error: incomplete derived-field dimensions "
-                                     f"in {path}")
-                if ntheta_fields:
-                    points = ntheta_fields * nzeta_fields
-                    field_values = (7 * (ns - 1) + 6 * ns) * points
-                    if len(f.read(8 * field_values)) != 8 * field_values:
-                        raise ValueError("error: truncated derived-field block "
-                                         f"in {path}")
-            if version < 3:
-                _no_params(path)
             precision, _, _, nstages = struct.unpack("<4i", f.read(16))
             # precision, status, total_iter, nstages (the header count is
             # the stage-record count; no second count follows the strings)
@@ -227,11 +208,8 @@ def load_state(path):
             _read_str(f)  # revision
             f.read(1)     # dirty
             _read_str(f)  # build_type
-            if version >= 2:
-                _read_str(f)  # precision_policy
-                _read_str(f)  # compile_flags
-            else:
-                _read_str(f)  # historical scalar_type slot
+            _read_str(f)  # precision_policy
+            _read_str(f)  # compile_flags
             source_path = _read_str(f)
             _read_str(f)  # source_hash
             for _ in range(4):  # gpu_name, driver, runtime, toolkit
@@ -243,40 +221,30 @@ def load_state(path):
                 nrst = struct.unpack("<i", f.read(4))[0]
                 f.read(4 * nrst)
             params = _read_input_record(
-                f, version == 4 or version >= 7,
-                version >= 5, version >= 5, version >= 6,
-                version == 10 or version >= 11 and count == 12, version >= 11)
+                f,
+                version == 10 or version >= 11 and count == 12, version >= 11, count == 12)
             params["_precision"] = "float" if precision == 1 else "double"
             params["_source_path"] = source_path
         if source_path:
             name = os.path.splitext(os.path.basename(source_path))[0]
         return ns, mnmax, fams, params, name
     if head.startswith(b"CUMECKP1"):
-        # Checkpoint: magic(8), version field(4), precision(4), ns(4), mnmax(4),
-        # the six families, then the v2 input record; v3 appends the
-        # free-boundary fields, v4 the inline-Makegrid paths, and v5 the
-        # optional embedded Makegrid parameters.
+        # Checkpoints contain spectral families and typed saved input.
         with open(path, "rb") as f:
             f.seek(8)
             version = struct.unpack("<i", f.read(4))[0]
-            if version == 7:
-                raise ValueError("error: JSON-based asymmetric input record is "
-                                 "no longer supported")
-            if not 1 <= version <= 9:
+            if version not in (8, 9):
                 raise ValueError(f"error: unsupported checkpoint version "
                                  f"{version} in {path}")
             f.read(4)  # precision (always double)
             ns, mnmax = struct.unpack("<ii", f.read(8))
-            count = struct.unpack("<i", f.read(4))[0] if version >= 7 else 6
+            count = struct.unpack("<i", f.read(4))[0]
             n = ns * mnmax
             fams = {fam: np.frombuffer(f.read(8 * n), dtype="<f8")
                     for fam in _family_names(count)}
-            if version < 2:
-                _no_params(path)
             params = _read_input_record(
-                f, version == 3 or version >= 6,
-                version >= 4, version >= 4, version >= 5,
-                version == 8 or version >= 9 and count == 12, version >= 9)
+                f,
+                version == 8 or version >= 9 and count == 12, version >= 9, count == 12)
             params["_precision"] = "double"
         return ns, mnmax, fams, params, name
     if head.startswith(b"CDF"):

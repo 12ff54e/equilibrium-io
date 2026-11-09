@@ -9,6 +9,15 @@
 #include <string_view>
 
 namespace equilibrium {
+namespace {
+Status decoded_quantities(const ReadDiagnostics& diagnostics) {
+    for (const auto& status : diagnostics.quantities)
+        if (status.availability == Availability::INVALID)
+            return Status("conversion cannot omit invalid data: " +
+                          status.diagnostic);
+    return {};
+}
+}  // namespace
 
 Result<OutputFormat> detect_format(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
@@ -30,21 +39,6 @@ Result<OutputFormat> detect_format(const std::string& path) {
         return OutputFormat::HDF5;
     }
     return Result<OutputFormat>("unsupported equilibrium container: " + path);
-}
-
-Result<Equilibrium> read(const std::string& path, ReadMode mode) {
-    auto format = detect_format(path);
-    if (!format) return Result<Equilibrium>(format.error());
-    return read(path, format.value(), mode);
-}
-
-Result<Equilibrium> read(const std::string& path,
-                         OutputFormat format,
-                         ReadMode mode) {
-    if (format == OutputFormat::BINARY) return read_binary(path, mode);
-    auto reader = make_reader(format);
-    if (!reader) return Result<Equilibrium>("input codec is unavailable");
-    return io_detail::read_record(*reader, path, format, mode);
 }
 
 Result<Equilibrium> read(const std::string& path, const ReadRequest& request) {
@@ -81,12 +75,16 @@ Status convert(const std::string& input, const std::string& output) {
     if (boozer) {
         try {
             const auto saved = read_boozer_binary(input);
+            auto status = decoded_quantities(saved.result.read_diagnostics);
+            if (!status) return status;
             write_boozer_output(output, saved.result, saved.source_path);
             return {};
         } catch (const std::exception& error) { return Status(error.what()); }
     }
     auto owner = read(input);
     if (!owner) return Status(owner.error());
+    auto status = decoded_quantities(owner.value().read_diagnostics);
+    if (!status) return status;
     return write(output, owner.value());
 }
 

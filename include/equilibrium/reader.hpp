@@ -3,30 +3,19 @@
 #define EQUILIBRIUM_INCLUDE_IO_READER_HPP_
 
 #include "equilibrium/equilibrium.hpp"
-#include "equilibrium/equilibrium_snapshot.hpp"
 #include "equilibrium/output_spec.hpp"
 #include "equilibrium/result.hpp"
-#include "equilibrium/run_report.hpp"
 
-#include <functional>
 #include <memory>
-#include <optional>
 
 namespace equilibrium {
 
 class Reader {
    public:
     virtual ~Reader() = default;
-    // Read spectral state and any scientific fields. When report is supplied,
-    // decode and validate the provenance too. Binary state-only reads skip
-    // the trailer; complete binary reads reject trailing data.
-    virtual Result<EquilibriumSnapshot> read(
+    virtual Result<Equilibrium> read(
         const std::string& path,
-        std::optional<std::reference_wrapper<RunReport>> report =
-            std::nullopt) = 0;
-    virtual Result<Equilibrium> read(const std::string&, const ReadRequest&) {
-        return Result<Equilibrium>("reader does not support group requests");
-    }
+        const ReadRequest& request = ReadRequest::all()) = 0;
 };
 
 // Full codec dispatch, linked through equilibrium::io. An unavailable codec

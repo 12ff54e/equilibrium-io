@@ -404,8 +404,7 @@ inline bool check_asymmetric_input_params(const InputParams& p) {
 
 inline bool write_input_params(FILE* fp,
                                const InputParams& p,
-                               bool asymmetric_extension = false,
-                               bool flux_extension = false) {
+                               bool asymmetric_extension) {
     bool ok = write_i32(fp, p.mpol) && write_i32(fp, p.ntor) &&
               write_i32(fp, p.nfp) && write_i32(fp, p.ntheta) &&
               write_i32(fp, p.nzeta) && write_i32(fp, p.ncurr) &&
@@ -446,18 +445,14 @@ inline bool write_input_params(FILE* fp,
              write_f64_vec(fp, p.zbc_value) && write_f64_vec(fp, p.rbsc) &&
              write_f64_vec(fp, p.rbcs) && write_f64_vec(fp, p.zbcc) &&
              write_f64_vec(fp, p.zbss);
-    if (flux_extension) ok = ok && write_string(fp, p.pflux_type);
+    ok = ok && write_string(fp, p.pflux_type);
     return ok;
 }
 
-// `with_profile_types` selects the record layout written by the version-4
-// binary trailer / version-3 checkpoint; older containers lack the three
-// profile-type strings and keep the "power_series" defaults.
+// Both supported layouts carry profile types and free-boundary metadata.
 inline bool read_input_params(FILE* fp,
                               InputParams& p,
                               std::string& reason,
-                              bool with_profile_types,
-                              int free_boundary_extension = 0,
                               bool asymmetric_extension = false,
                               bool flux_extension = false) {
     p = InputParams{};
@@ -470,9 +465,8 @@ inline bool read_input_params(FILE* fp,
         !read_f64(fp, p.spres_ped) || !read_f64(fp, p.bloat) ||
         !read_f64(fp, p.curtor) || !read_f64(fp, p.tcon0) ||
         !read_string(fp, p.schema) ||
-        (with_profile_types &&
-         (!read_string(fp, p.pmass_type) || !read_string(fp, p.piota_type) ||
-          !read_string(fp, p.pcurr_type))) ||
+        (!read_string(fp, p.pmass_type) || !read_string(fp, p.piota_type) ||
+         !read_string(fp, p.pcurr_type)) ||
         !read_f64_vec(fp, p.am, reason) || !read_f64_vec(fp, p.ac, reason) ||
         !read_f64_vec(fp, p.ai, reason) || !read_f64_vec(fp, p.aphi, reason) ||
         !read_f64_vec(fp, p.raxis_c, reason) ||
@@ -521,7 +515,7 @@ inline bool read_input_params(FILE* fp,
         reason = "boundary vector lengths disagree";
         return false;
     }
-    if (free_boundary_extension >= 1) {
+
         std::int32_t lfreeb = 0;
         if (!read_i32(fp, lfreeb) || !read_i32(fp, p.nvacskip) ||
             !read_string(fp, p.mgrid_file) ||
@@ -530,15 +524,13 @@ inline bool read_input_params(FILE* fp,
             return false;
         }
         p.lfreeb = (lfreeb != 0);
-    }
-    if (free_boundary_extension >= 2) {
+
         if (!read_string(fp, p.coils_file) ||
             !read_string(fp, p.makegrid_parameters_file)) {
             reason = "truncated input record";
             return false;
         }
-    }
-    if (free_boundary_extension >= 3) {
+
         std::int32_t has_embedded = 0;
         if (!read_i32(fp, has_embedded)) {
             reason = "truncated input record";
@@ -552,7 +544,7 @@ inline bool read_input_params(FILE* fp,
             }
             p.embedded_makegrid_parameters = parameters;
         }
-    }
+
     if (asymmetric_extension) {
         std::int32_t lasym = 0;
         if (!read_i32(fp, lasym) || (lasym != 0 && lasym != 1)) {
@@ -572,7 +564,7 @@ inline bool read_input_params(FILE* fp,
             !read_f64_vec(fp, p.rbcs, reason) ||
             !read_f64_vec(fp, p.zbcc, reason) ||
             !read_f64_vec(fp, p.zbss, reason) ||
-            !check_asymmetric_input_params(p)) {
+            (p.lasym && !check_asymmetric_input_params(p))) {
             if (reason.empty()) reason = "malformed asymmetric input record";
             return false;
         }

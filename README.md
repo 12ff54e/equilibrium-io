@@ -74,11 +74,11 @@ equilibrium::write_boozer_output("boozer.h5", saved.result, saved.source_path);
 ```
 
 The [Boozer v8 contract](docs/boozer-output-v8.md) links the preceding schemas.
-The binary component reads Boozer v3–v8 and provides `write_boozer_binary`.
+The binary component reads Boozer v7/v8 and provides `write_boozer_binary`.
 The `io` component adds suffix dispatch and NetCDF/HDF5 export. `convert` and
 `equilibrium-convert` recognize native equilibria and Boozer binaries. Boozer
-NetCDF/HDF5 input is not supported by the C++ API. Writers retain optional
-groups and source provenance; no absent group is filled with invented values.
+NetCDF/HDF5 input is not supported by the C++ API. Writers emit v8 and require every record defined by that schema. They retain
+source provenance and reject partial data before opening the output.
 
 ## Requested quantities
 
@@ -144,36 +144,37 @@ magnetic values use the half grid; current density uses the full grid.
 Grid metadata can be read without exposing or validating saved input.
 Solved native profiles remain absent in the current file formats.
 
-Boozer requests use `BoozerReadOptions::groups`, which accepts both quantities
-and group presets. By default, geometry, spectral shift, iota and strength
-are required; tracing, magnetic/maps and surface profiles are optional.
-Set `options.groups = {}` to start with no requested quantities. Shared radial
-coordinates are always read and validated. Iota is independently selectable.
-Magnetic/maps and surface profiles can be read without exposing tracing data.
-`magnetic_data()` returns a typed optional reference in either case;
-complete reads retain the existing `tracing->magnetic` member.
+Boozer requests use `BoozerReadOptions::request`, which accepts quantities
+and group presets. Both native and Boozer readers default to
+`ReadRequest::all()`: every quantity is optional. Mark consumer prerequisites
+`REQUIRED`; inspect diagnostics for optional failures. Set `options.request = {}`
+to start with no requested quantities. Shared radial coordinates are always
+validated. Iota is independently selectable. Magnetic data live in the single
+`BoozerResult::magnetic` record and do not require tracing data.
+`magnetic_data()` returns a typed optional reference.
 
 ```cpp
 equilibrium::BoozerReadOptions options;
 options.spectrum = equilibrium::SpectrumStorage::REAL;
-options.groups[equilibrium::DataGroup::TRACING] = equilibrium::Requirement::REQUIRED;
-options.groups[equilibrium::DataGroup::MAGNETIC] = equilibrium::Requirement::REQUIRED;
+options.request[equilibrium::DataGroup::GEOMETRY] = equilibrium::Requirement::REQUIRED;
+options.request[equilibrium::DataGroup::TRACING] = equilibrium::Requirement::REQUIRED;
+options.request[equilibrium::DataGroup::MAGNETIC] = equilibrium::Requirement::REQUIRED;
 auto file = equilibrium::read_boozer_binary("boozer.bin", options);
 const auto& coefficients = *file.result.real_spectrum;
 ```
 
-`REAL` preserves the requested real parity coefficients exactly and leaves
-complex arrays empty. R/Z geometry and spectral nu can be requested separately
+`REAL` is the default. It preserves the requested real parity coefficients
+exactly and leaves complex arrays empty. R/Z geometry and spectral nu can be
+requested separately
 in all three storage modes. Inactive `sin(0)` terms remain stored but contribute
-nothing to complex reconstruction. `COMPLEX` retains the existing representation;
+nothing to complex reconstruction. `COMPLEX` reconstructs complex coefficients;
 `BOTH` stores both. `has_real_spectrum()` and `has_complex_spectrum()` report
 which representations are exposed. Writers use the real representation when
 present, so a `REAL` read/write cycle preserves its coefficients. Writers
 reject partial selections that cannot form a complete output record.
 
-The existing no-options readers retain their strict complete/state-only
-contracts. Selected binary reads accept unused trailing data; they still
-require valid framing for requested groups. `detect_binary_kind(path)`
+Binary reads accept unused trailing data and require valid framing for
+requested quantities. `detect_binary_kind(path)`
 classifies native versus Boozer input without making a capability claim.
 All binary byte-order conversion belongs to this package.
 
@@ -248,7 +249,7 @@ terminating the process; ordinary file and truncated-struct errors remain
 catchable Python exceptions. `load_state` reads native cuMES formats only.
 
 The Python API also reads the geometry and field-strength subset of Boozer
-v3–v8 binary, NetCDF and HDF5 files:
+v7/v8 binary, NetCDF and HDF5 files:
 
 ```python
 from equilibrium_io import load_boozer
@@ -268,17 +269,15 @@ The Python reader needs the same optional codec extras listed above.
 
 `equilibrium/spectral_payload.hpp` exposes `read_spectral_payload(path)` and
 `read_spectral_state(path)` through `equilibrium::binary`. These inspect only
-the spectral portion of result binaries v1-v11. They accept missing or
+the spectral portion of result binaries v10/v11. They accept missing or
 unsupported trailing metadata and do not require a derived-field block.
 `read_spectral_payload` returns the exact stored bytes, including signed zero
-and NaN payload bits; it does not decode and rewrite them. Legacy unversioned
-files require `allow_legacy=true` and an exact file size. The usual per-family
-resource cap applies. Use `read` or `read_binary` for complete equilibria and
+and NaN payload bits; it does not decode and rewrite them. Unversioned and older files are rejected. The per-family resource cap applies. Use `read` or `read_binary` for complete equilibria and
 checkpoints.
 
 For browser diagnostics, `js/binary_payload.mjs` exports
 `scientificPayloadRanges(bytes)` and `digestScientificPayload(bytes)` for
-result binaries v8-v11 with derived fields. The latter uses Web Crypto SHA-256
+result binaries v10/v11 with derived fields. The latter uses Web Crypto SHA-256
 and excludes headers and provenance from its state and field digests. Import
 this module directly; it has no npm dependencies.
 
@@ -359,18 +358,17 @@ absent. Writes reject populated profiles unless the caller supplies
 `WriteOptions{ProfileWritePolicy::OMIT}`. Input profile prescriptions in
 `input` are distinct from these solved profiles.
 
-Complete reads are the default. They require saved input and, for result
-files, valid run provenance. No reader retries in a weaker mode after an
-error. Use `read(path, ReadMode::STATE_ONLY)` explicitly for historical state
-recovery: it skips the provenance trailer and leaves input, grid metadata,
-and provenance absent. Binary versions 1–11 and checkpoint versions 1–9
-support state recovery. Complete reads reject the obsolete JSON input in
-binary v9 and checkpoint v7, and records without complete saved input.
-Complete binary reads reject invalid tags, truncation, and trailing bytes.
+Native binary readers accept result v10/v11 and checkpoint v8/v9.
+Writers emit result v11 and checkpoint v9 for both symmetries and flux kinds.
+No reader falls back to an older format or weaker request after an error.
+Unused trailing bytes are allowed. To read only spectral geometry, request
+`DataGroup::GEOMETRY` and leave other quantities ignored.
 
-Checkpoints return spectral state and, in complete mode, saved input. They
-contain neither scientific fields nor run outcomes. Converting a checkpoint
-to a result therefore requires the caller to supply run provenance.
+Checkpoints provide spectral state and saved input, without scientific fields
+or run outcomes. Read them with `read_binary` or `read`; converting one to a
+result requires the caller to supply run provenance. `Reader::read` returns
+an `Equilibrium` and accepts the same request; it has no report out-parameter.
+
 `source` records the original container, version, and checkpoint status.
 HDF5/NetCDF use logical schema version 1, independent of binary versions.
 
