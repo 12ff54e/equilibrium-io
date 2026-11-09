@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-11-09
+
+### Breaking changes
 
 - Keep only result v10/v11, checkpoint v8/v9, and Boozer v7/v8 reads across
   C++, Python, and JavaScript. Writers always emit v11/v9/v8 respectively.
@@ -9,6 +11,12 @@
   quantity requests; no-options reads request all quantities as optional.
 - Default Boozer storage to REAL. Require complete data for v8 writes and
   reject malformed optional data during conversion.
+- Extend public data records and the Reader interface; C++ consumers must
+  migrate to the quantity-based read API and rebuild against these headers.
+- Require HDF5 1.14.6 or newer, including supplied codec targets and installed
+  consumers. Native `AUTO` builds skip older HDF5 libraries.
+
+### Added and changed
 
 - Select individual quantities with group assignment presets. Validate optional
   values independently, including pressure versus I/G and R/Z versus spectral
@@ -24,17 +32,18 @@
   values. Optional profiles no longer constrain independent selected groups.
 - Handle native binary scalar and array byte order inside the codecs.
 - Expose binary kind detection for consumers without file-version gates.
-- Extend public data records and the Reader interface; C++ consumers must
-  rebuild against these headers.
 
-- Require HDF5 1.14.6 or newer, including supplied codec targets and installed
-  consumers. Native `AUTO` builds skip older HDF5 libraries.
+### Fixes
+
 - Build HDF5 output in memory before publishing it, so storage-write failures
   preserve the destination, remove temporary files, and leave HDF5 usable.
   Image extraction briefly requires two serialized images plus HDF5 caches.
 - Check HDF5 dataset and attribute closes and release handles on early exits.
 - Test repeated storage failures, resource cleanup, library shutdown, and a
   later successful write for both state and Boozer output.
+- Fix CI scientific-library dependencies and Python fixture setup.
+- Fetch the pinned Wasm zlib dependency from the upstream GitHub tag archive
+  with SHA-256 verification, avoiding inconsistent downloads from zlib.net.
 
 ## 0.3.0 — 2026-11-05
 

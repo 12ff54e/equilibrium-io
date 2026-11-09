@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(equilibrium_io VERSION 0.3.0 LANGUAGES C CXX)
+project(equilibrium_io VERSION 0.4.0 LANGUAGES C CXX)
 
 set(EQUILIBRIUM_HDF5_MIN_VERSION 1.14.6)
 
