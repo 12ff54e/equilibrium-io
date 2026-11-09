@@ -298,7 +298,8 @@ void test_requests(const std::filesystem::path& scratch) {
             input.rbsc = input.rbcs = input.zbcc = input.zbss = {0, 0};
             require(bool(eq::write(path, asymmetric)),
                     "asymmetric selection fixture");
-            const auto corrupt_asymmetry = [&](bool tag, int value = 2) {
+            const auto corrupt_asymmetry = [&]([[maybe_unused]] bool tag,
+                                               [[maybe_unused]] int value = 2) {
 #ifdef EQUILIBRIUM_HAVE_NETCDF
                 if (format == eq::OutputFormat::NETCDF) {
                     int file = -1, var = -1;

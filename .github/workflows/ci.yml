@@ -27,7 +27,13 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libnetcdf-dev libhdf5-dev
+          sudo apt-get install -y ninja-build libnetcdf-dev zlib1g-dev
+      - name: Pinned native scientific libraries
+        if: matrix.hdf5 == 'ON'
+        run: |
+          bash .github/scripts/build-native-codecs.sh "$RUNNER_TEMP/native-codecs" "${{ matrix.netcdf }}"
+          echo "CMAKE_PREFIX_PATH=$RUNNER_TEMP/native-codecs/install" >> "$GITHUB_ENV"
+          echo "HDF5_ROOT=$RUNNER_TEMP/native-codecs/install" >> "$GITHUB_ENV"
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -80,14 +86,14 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libnetcdf-dev libhdf5-dev
+          sudo apt-get install -y ninja-build libnetcdf-dev zlib1g-dev
       - name: Install the NumPy-only package
         run: python3 -m pip install --target "$RUNNER_TEMP/python-only" .
       - name: Build binary fixtures
         run: |
           cmake -S . -B build-binary -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DEQUILIBRIUM_USE_NETCDF=OFF -DEQUILIBRIUM_USE_HDF5=OFF
-          cmake --build build-binary --target equilibrium_asymmetric_io --parallel 2
+          cmake --build build-binary --target equilibrium_asymmetric_io equilibrium_boozer_io --parallel 2
       - name: Installed binary reader without optional packages
         run: |
           source_dir="$PWD"
@@ -95,13 +101,21 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/python-only" python3 -S \
             "$source_dir/tests/python/test_state_io.py" \
             "$source_dir/build-binary/tests/equilibrium_asymmetric_io"
-          PYTHONPATH="$RUNNER_TEMP/python-only" python3 -S "$source_dir/tests/python/test_boozer_io.py"
+          PYTHONPATH="$RUNNER_TEMP/python-only" python3 -S \
+            "$source_dir/tests/python/test_boozer_io.py" \
+            "$source_dir/build-binary/tests/equilibrium_boozer_io"
       - name: Install scientific-container extras
         run: python3 -m pip install --target "$RUNNER_TEMP/python-all" '.[all]'
+      - name: Pinned native scientific libraries
+        run: |
+          bash .github/scripts/build-native-codecs.sh "$RUNNER_TEMP/native-codecs" ON
+          echo "CMAKE_PREFIX_PATH=$RUNNER_TEMP/native-codecs/install" >> "$GITHUB_ENV"
+          echo "HDF5_ROOT=$RUNNER_TEMP/native-codecs/install" >> "$GITHUB_ENV"
       - name: Build scientific fixtures
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target equilibrium_asymmetric_io --parallel 2
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DEQUILIBRIUM_USE_NETCDF=ON -DEQUILIBRIUM_USE_HDF5=ON
+          cmake --build build --target equilibrium_asymmetric_io equilibrium_boozer_io --parallel 2
       - name: Installed reader for all formats
         run: |
           source_dir="$PWD"
@@ -109,4 +123,6 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/python-all" python3 -S \
             "$source_dir/tests/python/test_state_io.py" \
             "$source_dir/build/tests/equilibrium_asymmetric_io"
-          PYTHONPATH="$RUNNER_TEMP/python-all" python3 -S "$source_dir/tests/python/test_boozer_io.py"
+          PYTHONPATH="$RUNNER_TEMP/python-all" python3 -S \
+            "$source_dir/tests/python/test_boozer_io.py" \
+            "$source_dir/build/tests/equilibrium_boozer_io"
