@@ -18,8 +18,10 @@ set(EQUILIBRIUM_WASM_CMAKE_ARGS
 
 ExternalProject_Add(equilibrium_wasm_zlib
   PREFIX ${EQUILIBRIUM_WASM_PREFIX}/zlib
-  URL https://zlib.net/fossils/zlib-1.3.1.tar.gz
-  URL_HASH SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+  # zlib.net can return non-archive responses to CI runners. Use the upstream
+  # GitHub tag archive, as for HDF5 and NetCDF below, with its own checksum.
+  URL https://codeload.github.com/madler/zlib/tar.gz/refs/tags/v1.3.1
+  URL_HASH SHA256=17e88863f3600672ab49182f217281b6fc4d3c762bde361935e436a95214d05c
   CMAKE_ARGS ${EQUILIBRIUM_WASM_CMAKE_ARGS} -DZLIB_BUILD_EXAMPLES:BOOL=OFF
   BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target zlibstatic
   INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_if_different
