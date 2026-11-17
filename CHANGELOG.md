@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add an axisymmetric spdata coefficient record, borrowed view, validation,
+  and atomic text writer compatible with MCT. Preserve caller-supplied units
+  and the special axis polynomial terms. Coordinate conversion and spline
+  fitting remain producer responsibilities.
+
+## Unreleased
+
 - Require HDF5 1.14.6 or newer, including supplied codec targets and installed
   consumers. Native `AUTO` builds skip older HDF5 libraries.
 - Build HDF5 output in memory before publishing it, so storage-write failures

@@ -1,4 +1,5 @@
 #include <equilibrium/equilibrium.hpp>
+#include <equilibrium/spdata_validation.hpp>
 
 #ifdef EQUILIBRIUM_COMPONENT_binary
 #include <equilibrium/binary.hpp>
@@ -7,9 +8,12 @@
 #endif
 #ifdef EQUILIBRIUM_COMPONENT_io
 #include <equilibrium/io.hpp>
+#include <equilibrium/spdata_output.hpp>
 #endif
 
 int main() {
+    equilibrium::Spdata spdata;
+    if (equilibrium::validate_spdata(spdata)) return 5;
     equilibrium::Equilibrium owner;
     const auto view = equilibrium::as_view(owner);
     if (!view.families.empty()) return 1;
@@ -23,5 +27,6 @@ int main() {
 #endif
 #ifdef EQUILIBRIUM_COMPONENT_io
     if (equilibrium::read("does-not-exist.bin")) return 2;
+    if (equilibrium::write_spdata("invalid-spdata.dat", spdata)) return 6;
 #endif
 }

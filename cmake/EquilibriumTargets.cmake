@@ -23,7 +23,7 @@ function(equilibrium_add_io_library target binary_target)
   endif()
   get_filename_component(root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.." ABSOLUTE)
   add_library(${target} STATIC ${root}/src/writer_dispatch.cpp ${root}/src/io.cpp
-    ${root}/src/boozer_dispatch.cpp)
+    ${root}/src/boozer_dispatch.cpp ${root}/src/spdata_output.cpp)
   target_link_libraries(${target} PUBLIC ${binary_target})
   set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
   foreach(backend IN ITEMS NETCDF HDF5)

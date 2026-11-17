@@ -58,6 +58,14 @@ add cuMES first and link its existing `equilibrium::data`, `equilibrium::binary`
 or `equilibrium::io` targets. Do not add another copy of the package to that
 build. Installed cuMES consumers reuse its `find_dependency(equilibrium_io)`.
 
+## Axisymmetric spdata output
+
+`equilibrium::Spdata` holds prepared quadratic coefficients for MCT-compatible
+spdata text. `equilibrium::write_spdata("spdata.dat", data)` validates and
+publishes them through `equilibrium::io`, with no optional codec. The producer
+owns coordinate conversion and spline fitting. See the [spdata contract](docs/spdata.md)
+for indexing, axis terms, units, and text limits.
+
 ## Boozer exports
 
 `equilibrium/boozer.hpp` holds `BoozerResult` and its optional tracing,

@@ -43,7 +43,7 @@ endfunction()
 
 set(codec_tests
   host_io checkpoint asymmetric_io io_golden output_failure spectral_payload
-  boozer_io)
+  boozer_io spdata_io)
 if(EQUILIBRIUM_HAVE_NETCDF OR EQUILIBRIUM_HAVE_HDF5)
   list(APPEND codec_tests io_restart_offsets)
   # Sparse-file fixtures with 2^40 extents require a native 64-bit filesystem.
