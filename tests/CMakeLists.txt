@@ -58,12 +58,21 @@ foreach(test IN LISTS codec_tests)
   equilibrium_add_test(equilibrium_${test} test_${test}.cpp equilibrium::io FALSE)
 endforeach()
 
+if(EQUILIBRIUM_HAVE_GFILE)
+  equilibrium_add_test(equilibrium_gfile_test test_gfile.cpp equilibrium::gfile FALSE)
+endif()
+
 if(EQUILIBRIUM_SANITIZER_TESTS)
   if(EMSCRIPTEN OR NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     message(FATAL_ERROR "Sanitizer tests require a native GCC or Clang build")
   endif()
   equilibrium_add_binary_library(equilibrium_binary_asan)
   equilibrium_add_io_library(equilibrium_io_asan equilibrium_binary_asan ${EQUILIBRIUM_CODEC_TARGETS})
+  if(EQUILIBRIUM_HAVE_GFILE)
+    equilibrium_add_gfile_library(equilibrium_gfile_asan)
+    equilibrium_sanitize(equilibrium_gfile_asan)
+    equilibrium_add_test(equilibrium_gfile_test_asan test_gfile.cpp equilibrium_gfile_asan TRUE)
+  endif()
   equilibrium_sanitize(equilibrium_binary_asan)
   equilibrium_sanitize(equilibrium_io_asan)
   equilibrium_add_test(equilibrium_contract_asan contract.cpp equilibrium_io_asan TRUE)
@@ -77,6 +86,7 @@ if(EQUILIBRIUM_STANDALONE AND NOT CMAKE_CROSSCOMPILING)
     COMMAND ${CMAKE_COMMAND}
       -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
       -DBINARY_DIR=${PROJECT_BINARY_DIR}
+      -DHAVE_GFILE=${EQUILIBRIUM_HAVE_GFILE}
       -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
       -P ${CMAKE_CURRENT_SOURCE_DIR}/installed_components.cmake)
 endif()

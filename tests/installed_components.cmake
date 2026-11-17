@@ -8,7 +8,11 @@ endfunction()
 
 set(prefix "${BINARY_DIR}/installed-test")
 run("${CMAKE_COMMAND}" --install "${BINARY_DIR}" --prefix "${prefix}")
-foreach(component IN ITEMS data binary io)
+set(components data binary io)
+if(HAVE_GFILE)
+  list(APPEND components gfile)
+endif()
+foreach(component IN LISTS components)
   set(disabled)
   if(NOT component STREQUAL "io")
     set(disabled -DCMAKE_DISABLE_FIND_PACKAGE_HDF5=ON

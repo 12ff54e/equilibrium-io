@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add the optional G-file component and converter, using libmeq's `delegation`
+  branch with COCOS sign and flux-unit fixes. Convert pressure/iota profiles
+  to normalized toroidal flux and fit the fixed-boundary cuMES input.
+- Add upper/lower LCFS elongation and triangularity with an explicit height
+  reference, measured on the original polygon.
+
 - Add an axisymmetric spdata coefficient record, borrowed view, validation,
   and atomic text writer compatible with MCT. Preserve caller-supplied units
   and the special axis polynomial terms. Coordinate conversion and spline

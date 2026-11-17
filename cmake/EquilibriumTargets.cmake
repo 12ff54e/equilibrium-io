@@ -48,3 +48,20 @@ function(equilibrium_add_io_library target binary_target)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
   endif()
 endfunction()
+
+# libmeq's CMake changes global flags and builds its own tests unconditionally.
+# Consume its public headers privately instead, with the same spline layout
+# as magnetic-coordinate. No libmeq/spline headers appear in the installed API.
+function(equilibrium_add_gfile_library target)
+  get_filename_component(root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.." ABSOLUTE)
+  add_library(${target} STATIC ${root}/src/gfile.cpp)
+  target_link_libraries(${target} PUBLIC equilibrium::data)
+  target_compile_features(${target} PUBLIC cxx_std_20)
+  set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
+  target_include_directories(${target} SYSTEM PRIVATE ${root}/deps/libmeq)
+  target_compile_definitions(${target} PRIVATE
+    INTP_CELL_LAYOUT INTP_PERIODIC_NO_DUMMY_POINT)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+endfunction()

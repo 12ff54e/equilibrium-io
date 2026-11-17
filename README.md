@@ -36,6 +36,7 @@ target_link_libraries(analysis PRIVATE equilibrium::io)
 | `data` | Equilibrium and Boozer records, views, structural validation | C++20 standard library |
 | `binary` | Above plus native/Boozer binary results and checkpoints | `data` |
 | `io` | Above plus format selection and conversion | Enabled NetCDF/HDF5 libraries |
+| `gfile` | GEQDSK to cuMES input; LCFS shape | `data`; private libmeq headers at build time |
 
 Selecting `data` or `binary` does not search for NetCDF, HDF5, or CUDA, even
 when the installed package includes those codecs.
@@ -57,6 +58,16 @@ Set the codec options before adding the dependency. When embedding cuMES,
 add cuMES first and link its existing `equilibrium::data`, `equilibrium::binary`,
 or `equilibrium::io` targets. Do not add another copy of the package to that
 build. Installed cuMES consumers reuse its `find_dependency(equilibrium_io)`.
+
+## G-file input and LCFS shape
+
+With the `deps/libmeq` submodule on its pinned `delegation` revision,
+`equilibrium::gfile_to_cumes_input` converts a G-file into cuMES input, including
+COCOS signs, toroidal-flux profile remapping, and Fourier boundary fitting.
+`read_gfile_lcfs` and `calculate_lcfs_shape` provide upper/lower elongation and
+triangularity from the original LCFS. The optional `equilibrium::gfile` component
+and `equilibrium-gfile` tool need no CUDA or scientific codecs. See the
+[G-file guide](docs/gfile.md) for build options, formulas, and limits.
 
 ## Axisymmetric spdata output
 

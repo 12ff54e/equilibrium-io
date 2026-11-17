@@ -11,7 +11,24 @@
 #include <equilibrium/spdata_output.hpp>
 #endif
 
+#ifdef EQUILIBRIUM_COMPONENT_gfile
+#include <sstream>
+
+#include <equilibrium/gfile.hpp>
+#endif
+
 int main() {
+#ifdef EQUILIBRIUM_COMPONENT_gfile
+    const std::vector<equilibrium::LcfsPoint> points{
+        {4, 0}, {3, 2}, {2, 0}, {3, -1}};
+    const auto shape = equilibrium::calculate_lcfs_shape(points, 0);
+    if (shape.elongation_upper != 2 || shape.elongation_lower != 1) return 7;
+    std::istringstream malformed("invalid gfile");
+    try {
+        equilibrium::gfile_to_cumes_input(malformed);
+        return 8;
+    } catch (const std::exception&) {}
+#endif
     equilibrium::Spdata spdata;
     if (equilibrium::validate_spdata(spdata)) return 5;
     equilibrium::Equilibrium owner;
