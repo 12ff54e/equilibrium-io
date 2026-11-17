@@ -6,6 +6,10 @@ function(equilibrium_add_binary_library target)
   include(${CMAKE_CURRENT_FUNCTION_LIST_DIR}/sources.cmake)
   add_library(${target} STATIC ${EQUILIBRIUM_BINARY_SOURCES})
   target_compile_features(${target} PUBLIC cxx_std_20)
+  # Export a feature/API marker so consumers cannot mix this branch with the
+  # incompatible 0.4 records or an older package lacking the spdata writer.
+  target_compile_definitions(${target} INTERFACE
+    EQUILIBRIUM_IO_SPDATA_LEGACY_API=1)
   set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
   target_include_directories(${target} PUBLIC
     $<BUILD_INTERFACE:${EQUILIBRIUM_SOURCE_DIR}/include>

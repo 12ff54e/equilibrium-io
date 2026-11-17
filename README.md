@@ -64,7 +64,9 @@ build. Installed cuMES consumers reuse its `find_dependency(equilibrium_io)`.
 spdata text. `equilibrium::write_spdata("spdata.dat", data)` validates and
 publishes them through `equilibrium::io`, with no optional codec. The producer
 owns coordinate conversion and spline fitting. See the [spdata contract](docs/spdata.md)
-for indexing, axis terms, units, and text limits.
+for indexing, axis terms, units, and text limits. The binary and I/O targets
+export `EQUILIBRIUM_IO_SPDATA_LEGACY_API=1` to identify this feature on the
+pre-0.4 record API.
 
 ## Boozer exports
 
