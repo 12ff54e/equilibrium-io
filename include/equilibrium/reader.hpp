@@ -6,6 +6,7 @@
 #include "equilibrium/output_spec.hpp"
 #include "equilibrium/result.hpp"
 
+#include <cstddef>
 #include <memory>
 
 namespace equilibrium {
@@ -24,6 +25,8 @@ std::unique_ptr<Reader> make_reader(OutputFormat format);
 
 // Binary-only factory (host I/O library; no backend defines required).
 std::unique_ptr<Reader> make_binary_reader();
+// Reject a spectral family larger than this many doubles before allocating it.
+std::unique_ptr<Reader> make_binary_reader(std::size_t max_family_elements);
 
 }  // namespace equilibrium
 

@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -171,17 +172,24 @@ bool read_provenance(FILE* fp,
 
 class VersionedBinaryReader final : public Reader {
    public:
+    explicit VersionedBinaryReader(std::size_t max_family_elements)
+        : max_family_elements_(max_family_elements) {}
+
     Result<Equilibrium> read(const std::string& path,
                              const ReadRequest& request) override {
-        return io_detail::read_native_binary(path, request);
+        return io_detail::read_native_binary(path, request, max_family_elements_);
     }
+
+   private:
+    std::size_t max_family_elements_;
 };
 }  // namespace
 
 namespace io_detail {
 
 Result<Equilibrium> read_native_binary(const std::string& path,
-                                       const ReadRequest& request) {
+                                       const ReadRequest& request,
+                                       std::size_t max_family_elements) {
     const auto close = [](FILE* fp) { fclose(fp); };
     std::unique_ptr<FILE, decltype(close)> file(fopen(path.c_str(), "rb"),
                                                 close);
@@ -227,6 +235,8 @@ Result<Equilibrium> read_native_binary(const std::string& path,
         std::string reason;
         if (!check_state_dimensions(fp, ns, modes, count, reason, components))
             throw std::runtime_error(reason);
+        if (count > max_family_elements)
+            throw std::runtime_error("spectral family exceeds reader limit");
         owner.ns = ns;
         owner.mnmax = modes;
         owner.symmetry = components == 12;
@@ -347,7 +357,11 @@ std::unique_ptr<Writer> make_binary_writer() {
 }
 
 std::unique_ptr<Reader> make_binary_reader() {
-    return std::make_unique<VersionedBinaryReader>();
+    return make_binary_reader(std::numeric_limits<std::size_t>::max());
+}
+
+std::unique_ptr<Reader> make_binary_reader(std::size_t max_family_elements) {
+    return std::make_unique<VersionedBinaryReader>(max_family_elements);
 }
 
 }  // namespace equilibrium

@@ -43,7 +43,7 @@ endfunction()
 
 set(codec_tests
   host_io checkpoint asymmetric_io io_golden output_failure spectral_payload
-  boozer_io)
+  boozer_io spdata_io)
 if(EQUILIBRIUM_HAVE_NETCDF OR EQUILIBRIUM_HAVE_HDF5)
   list(APPEND codec_tests io_restart_offsets)
   # Sparse-file fixtures with 2^40 extents require a native 64-bit filesystem.
@@ -58,12 +58,23 @@ foreach(test IN LISTS codec_tests)
   equilibrium_add_test(equilibrium_${test} test_${test}.cpp equilibrium::io FALSE)
 endforeach()
 
+if(EQUILIBRIUM_HAVE_GFILE)
+  equilibrium_add_test(equilibrium_gfile_test test_gfile.cpp equilibrium::gfile FALSE)
+  equilibrium_add_test(equilibrium_miller_batch_test test_miller_batch.cpp equilibrium::gfile FALSE)
+endif()
+
 if(EQUILIBRIUM_SANITIZER_TESTS)
   if(EMSCRIPTEN OR NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     message(FATAL_ERROR "Sanitizer tests require a native GCC or Clang build")
   endif()
   equilibrium_add_binary_library(equilibrium_binary_asan)
   equilibrium_add_io_library(equilibrium_io_asan equilibrium_binary_asan ${EQUILIBRIUM_CODEC_TARGETS})
+  if(EQUILIBRIUM_HAVE_GFILE)
+    equilibrium_add_gfile_library(equilibrium_gfile_asan)
+    equilibrium_sanitize(equilibrium_gfile_asan)
+    equilibrium_add_test(equilibrium_gfile_test_asan test_gfile.cpp equilibrium_gfile_asan TRUE)
+    equilibrium_add_test(equilibrium_miller_batch_test_asan test_miller_batch.cpp equilibrium_gfile_asan TRUE)
+  endif()
   equilibrium_sanitize(equilibrium_binary_asan)
   equilibrium_sanitize(equilibrium_io_asan)
   equilibrium_add_test(equilibrium_contract_asan contract.cpp equilibrium_io_asan TRUE)
@@ -77,6 +88,7 @@ if(EQUILIBRIUM_STANDALONE AND NOT CMAKE_CROSSCOMPILING)
     COMMAND ${CMAKE_COMMAND}
       -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
       -DBINARY_DIR=${PROJECT_BINARY_DIR}
+      -DHAVE_GFILE=${EQUILIBRIUM_HAVE_GFILE}
       -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
       -P ${CMAKE_CURRENT_SOURCE_DIR}/installed_components.cmake)
 endif()
@@ -104,6 +116,11 @@ endif()
 
 if(EQUILIBRIUM_JS_TESTS)
   find_program(EQUILIBRIUM_NODE NAMES node nodejs REQUIRED)
+  if(TARGET equilibrium-gfile AND NOT CMAKE_CROSSCOMPILING)
+    add_test(NAME equilibrium_miller_cli
+      COMMAND ${EQUILIBRIUM_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/test_miller_cli.mjs
+        $<TARGET_FILE:equilibrium-gfile>)
+  endif()
   add_test(NAME equilibrium_js
     COMMAND ${EQUILIBRIUM_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/test_binary_payload.mjs)
 endif()

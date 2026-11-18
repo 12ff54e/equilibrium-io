@@ -114,6 +114,15 @@ static void test_v1_round_trip() {
     check(back.has_value() && equilibrium::test::same_state(s, back.value()),
           "v1: round-trip preserves state");
 
+    auto at_limit = equilibrium::make_binary_reader(s.family_size());
+    check(at_limit->read(spec.path, equilibrium::test::state_request()).has_value(),
+          "binary: inclusive family limit");
+    auto below_limit = equilibrium::make_binary_reader(s.family_size() - 1);
+    auto oversized = below_limit->read(spec.path);
+    check(!oversized &&
+              oversized.error().find("reader limit") != std::string::npos,
+          "binary: reader rejects a family over the requested limit");
+
     // Corrupt the magic -> reader rejects.
     {
         std::fstream f(spec.path,

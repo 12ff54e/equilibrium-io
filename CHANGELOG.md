@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- Allow binary readers to set an allocation limit per spectral family.
+
+- Generate cuMES input batches from a G-file with independent Miller ranges
+  for major radius and upper/lower elongation and triangularity. Record the
+  requested and fitted shape of each case in a CSV index.
+
+- Add the optional G-file component and converter, using libmeq's `delegation`
+  branch with COCOS sign and flux-unit fixes. Convert pressure/iota profiles
+  to normalized toroidal flux and fit the fixed-boundary cuMES input.
+- Add upper/lower LCFS elongation and triangularity with an explicit height
+  reference, measured on the original polygon.
+
+- Add an axisymmetric spdata coefficient record, borrowed view, validation,
+  and atomic text writer compatible with MCT. Preserve caller-supplied units
+  and the special axis polynomial terms. Coordinate conversion and spline
+  fitting remain producer responsibilities.
+- Sample signed Boozer fields directly from GEQDSK through libmeq.
+
 ## 0.4.0 — 2026-11-09
 
 ### Breaking changes

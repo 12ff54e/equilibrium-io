@@ -1,0 +1,4 @@
+[submodule "deps/libmeq"]
+	path = deps/libmeq
+	url = ../../12ff54e/libmeq
+	branch = delegation

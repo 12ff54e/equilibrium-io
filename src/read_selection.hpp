@@ -3,6 +3,7 @@
 #include "equilibrium/binary.hpp"
 #include "equilibrium/validation.hpp"
 
+#include <limits>
 #include <stdexcept>
 
 namespace equilibrium::io_detail {
@@ -182,8 +183,10 @@ class ReadSelection {
     const ReadRequest& request_;
 };
 
-Result<Equilibrium> read_native_binary(const std::string& path,
-                                       const ReadRequest& request);
+Result<Equilibrium> read_native_binary(
+    const std::string& path,
+    const ReadRequest& request,
+    std::size_t max_family_elements = std::numeric_limits<std::size_t>::max());
 
 struct ContainerReadSelection {
     ReadSelection selection;

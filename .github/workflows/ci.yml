@@ -24,6 +24,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          submodules: ${{ matrix.sanitizers == 'ON' && 'recursive' || 'false' }}
       - name: Dependencies
         run: |
           sudo apt-get update
@@ -40,6 +41,7 @@ jobs:
           -DEQUILIBRIUM_USE_NETCDF=${{ matrix.netcdf }}
           -DEQUILIBRIUM_USE_HDF5=${{ matrix.hdf5 }}
           -DEQUILIBRIUM_SANITIZER_TESTS=${{ matrix.sanitizers }}
+          -DEQUILIBRIUM_USE_LIBMEQ=${{ matrix.sanitizers }}
           -DEQUILIBRIUM_JS_TESTS=ON
       - name: Build
         run: cmake --build build --parallel 2
