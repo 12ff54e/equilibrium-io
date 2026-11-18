@@ -379,6 +379,15 @@ MixedGridSpectrum restore_complex_spectrum(const RealBoozerSpectrum& spectrum,
 }  // namespace equilibrium
 
 namespace equilibrium {
+MixedGridSpectrum complex_boozer_spectrum(const RealBoozerSpectrum& real,
+                                          int source_ns,
+                                          int first_surface) {
+    if (first_surface < 1 || first_surface >= source_ns)
+        throw std::invalid_argument("invalid Boozer source surfaces");
+    return boozer_detail::restore_complex_spectrum(real, source_ns,
+                                                   first_surface);
+}
+
 void validate_boozer_result(const BoozerResult& result) {
     boozer_detail::validate_result(result);
 }

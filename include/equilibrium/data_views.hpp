@@ -22,11 +22,16 @@ struct FieldGrid {
         if (radial_points < 1 || ntheta < 1 || nzeta < 1) return std::nullopt;
         auto plane = checked_mul(static_cast<std::size_t>(ntheta),
                                  static_cast<std::size_t>(nzeta));
-        return plane ? checked_mul(*plane, radial_points) : std::nullopt;
+        return plane ? checked_mul(*plane,
+                                   static_cast<std::size_t>(radial_points))
+                     : std::nullopt;
     }
     // Theta is contiguous. Indices must lie within the grid.
     std::size_t index(std::size_t radial, int theta, int zeta) const {
-        return (radial * nzeta + zeta) * ntheta + theta;
+        return (radial * static_cast<std::size_t>(nzeta) +
+                static_cast<std::size_t>(zeta)) *
+                   static_cast<std::size_t>(ntheta) +
+               static_cast<std::size_t>(theta);
     }
 };
 
@@ -50,7 +55,8 @@ struct FluxDerivativesView {
     std::span<const double> toroidal;
     std::span<const double> poloidal;
     double s(std::size_t radial) const {
-        return static_cast<double>(radial) / (toroidal.size() - 1);
+        return static_cast<double>(radial) /
+               static_cast<double>(toroidal.size() - 1);
     }
 };
 
@@ -80,7 +86,7 @@ inline double full_radial_s(int source_ns, std::size_t radial) {
     return static_cast<double>(radial) / (source_ns - 1);
 }
 inline double half_radial_s(int source_ns, std::size_t radial) {
-    return (radial + .5) / (source_ns - 1);
+    return (static_cast<double>(radial) + .5) / (source_ns - 1);
 }
 
 enum class SpectralLayout { MODE_MAJOR, SURFACE_MAJOR };
@@ -93,10 +99,16 @@ struct SpectralGrid {
     // Native: m-major modes, surface contiguous. Boozer: n-major modes,
     // mode contiguous. Indices must lie within the spectral grid.
     std::size_t index(std::size_t surface, int m, int n) const {
+        const auto toroidal_modes = static_cast<std::size_t>(ntor) + 1;
+        const auto poloidal = static_cast<std::size_t>(m);
+        const auto toroidal = static_cast<std::size_t>(n);
         if (layout == SpectralLayout::MODE_MAJOR)
-            return static_cast<std::size_t>(m * (ntor + 1) + n) * surfaces +
+            return (poloidal * toroidal_modes + toroidal) *
+                       static_cast<std::size_t>(surfaces) +
                    surface;
-        return (surface * (ntor + 1) + n) * mpol + m;
+        return (surface * toroidal_modes + toroidal) *
+                   static_cast<std::size_t>(mpol) +
+               poloidal;
     }
 };
 

@@ -23,6 +23,7 @@ ExternalProject_Add(equilibrium_wasm_zlib
   URL https://codeload.github.com/madler/zlib/tar.gz/refs/tags/v1.3.1
   URL_HASH SHA256=17e88863f3600672ab49182f217281b6fc4d3c762bde361935e436a95214d05c
   CMAKE_ARGS ${EQUILIBRIUM_WASM_CMAKE_ARGS} -DZLIB_BUILD_EXAMPLES:BOOL=OFF
+    -DCMAKE_PROJECT_zlib_INCLUDE:FILEPATH=${CMAKE_CURRENT_LIST_DIR}/zlib_wasm.cmake
   BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target zlibstatic
   INSTALL_COMMAND ${CMAKE_COMMAND} -E copy_if_different
     <BINARY_DIR>/libz.a ${EQUILIBRIUM_WASM_INSTALL}/lib/libz.a

@@ -12,6 +12,11 @@ namespace equilibrium {
 // error.
 void validate_boozer_result(const BoozerResult& result);
 
+// Reconstruct signed Fourier modes from retained real coefficients.
+MixedGridSpectrum complex_boozer_spectrum(const RealBoozerSpectrum& real,
+                                          int source_ns,
+                                          int first_surface);
+
 struct BoozerFile {
     std::string source_path;
     BoozerResult result;

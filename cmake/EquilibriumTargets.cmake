@@ -8,7 +8,8 @@ function(equilibrium_add_binary_library target)
   target_compile_features(${target} PUBLIC cxx_std_20)
   # Consumers can require spdata and bounded reads on the quantity-based API.
   target_compile_definitions(${target} INTERFACE
-    EQUILIBRIUM_IO_SPDATA=1 EQUILIBRIUM_IO_BOUNDED_BINARY_READER=1)
+    EQUILIBRIUM_IO_SPDATA=1 EQUILIBRIUM_IO_BOUNDED_BINARY_READER=1
+    EQUILIBRIUM_IO_COMPLEX_BOOZER_SPECTRUM=1)
   set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
   target_include_directories(${target} PUBLIC
     $<BUILD_INTERFACE:${EQUILIBRIUM_SOURCE_DIR}/include>
