@@ -60,6 +60,7 @@ endforeach()
 
 if(EQUILIBRIUM_HAVE_GFILE)
   equilibrium_add_test(equilibrium_gfile_test test_gfile.cpp equilibrium::gfile FALSE)
+  equilibrium_add_test(equilibrium_miller_batch_test test_miller_batch.cpp equilibrium::gfile FALSE)
 endif()
 
 if(EQUILIBRIUM_SANITIZER_TESTS)
@@ -72,6 +73,7 @@ if(EQUILIBRIUM_SANITIZER_TESTS)
     equilibrium_add_gfile_library(equilibrium_gfile_asan)
     equilibrium_sanitize(equilibrium_gfile_asan)
     equilibrium_add_test(equilibrium_gfile_test_asan test_gfile.cpp equilibrium_gfile_asan TRUE)
+    equilibrium_add_test(equilibrium_miller_batch_test_asan test_miller_batch.cpp equilibrium_gfile_asan TRUE)
   endif()
   equilibrium_sanitize(equilibrium_binary_asan)
   equilibrium_sanitize(equilibrium_io_asan)
@@ -113,6 +115,11 @@ endif()
 
 if(EQUILIBRIUM_JS_TESTS)
   find_program(EQUILIBRIUM_NODE NAMES node nodejs REQUIRED)
+  if(TARGET equilibrium-gfile AND NOT CMAKE_CROSSCOMPILING)
+    add_test(NAME equilibrium_miller_cli
+      COMMAND ${EQUILIBRIUM_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/test_miller_cli.mjs
+        $<TARGET_FILE:equilibrium-gfile>)
+  endif()
   add_test(NAME equilibrium_js
     COMMAND ${EQUILIBRIUM_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/test_binary_payload.mjs)
 endif()

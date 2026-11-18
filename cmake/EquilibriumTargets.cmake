@@ -54,7 +54,7 @@ endfunction()
 # as magnetic-coordinate. No libmeq/spline headers appear in the installed API.
 function(equilibrium_add_gfile_library target)
   get_filename_component(root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.." ABSOLUTE)
-  add_library(${target} STATIC ${root}/src/gfile.cpp)
+  add_library(${target} STATIC ${root}/src/gfile.cpp ${root}/src/miller_batch.cpp)
   target_link_libraries(${target} PUBLIC equilibrium::data)
   target_compile_features(${target} PUBLIC cxx_std_20)
   set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)

@@ -159,6 +159,72 @@ Z reference must lie strictly between the vertical extrema. Dimensions are in
 metres; elongation and triangularity are dimensionless. This definition does
 not use the magnetic-axis R, equatorial crossings, or an average of both halves.
 
+## Miller boundary scans
+
+Use `equilibrium-gfile` to generate one cuMES input for every combination
+of major radius, upper and lower elongation, and upper and lower triangularity.
+
+```sh
+equilibrium-gfile g123456 --miller-batch miller-inputs --mpol 16 \
+  --r0 2.9:3.1:0.1 \
+  --kappa-upper 1.4:1.6:0.2 --kappa-lower 1.2:1.4:0.2 \
+  --delta-upper 0:0.2:0.2 --delta-lower 0:-0.2:-0.2
+```
+
+This example requests 48 files. A range has the form `FIRST:LAST:STEP`.
+The step may be negative for a descending scan. The last value is included
+when the steps reach it, allowing for floating-point roundoff. A single number
+fixes a parameter. Omit an option to use its measured value from the G-file
+LCFS. The default limit is 10000 cases and can be changed with `--max-cases`.
+
+The same function is available through `equilibrium::gfile`.
+
+```cpp
+#include <equilibrium/miller_batch.hpp>
+
+equilibrium::MillerScan scan;
+scan.r0 = equilibrium::MillerRange{2.9, 3.1, 0.1};
+scan.kappa_upper = equilibrium::MillerRange{1.4, 1.6, 0.2};
+scan.delta_lower = equilibrium::MillerRange{0.0, -0.2, -0.2};
+
+equilibrium::GfileInputSettings settings;
+settings.mpol = 16;
+auto count = equilibrium::write_miller_batch("g123456", "miller-inputs", scan, settings);
+```
+
+Each half is a Miller arc. For angle `u` increasing counterclockwise in the
+R–Z plane, use the upper pair of parameters for `0 ≤ u ≤ π` and the lower pair
+for `π ≤ u ≤ 2π`.
+
+```text
+R(u) = R0 + a cos(u + asin(delta) sin(u))
+Z(u) = Z0 + a kappa sin(u)
+```
+
+The input G-file sets the minor radius `a=(Rmax-Rmin)/2` and magnetic-axis
+height `Z0`. The two arcs meet at `(R0±a,Z0)`. Their tip radii are
+`R0-a*delta_upper` and `R0-a*delta_lower`. The generator seeds the cuMES axis
+at `(R0,Z0)`. It keeps the full-edge G-file pressure, iota, toroidal flux and
+solver settings for every case. Field strength can change with geometry at
+fixed toroidal flux. Use `R0>a`, positive elongations, and triangularities
+strictly between −1 and 1.
+
+For Fourier fitting, the generator samples the same two arcs using an angle
+in which Z varies sinusoidally between the requested extrema. This keeps
+the tangent speed continuous at the midplane joins when the two elongations
+differ. A finer grid then checks the reconstructed Fourier contour for
+positive R, positive poloidal orientation, and agreement with both Miller
+arcs. It measures both fitted half-shapes with `calculate_lcfs_shape`.
+The default tolerance is `1e-3` for dimensionless shape errors and `1e-3*a`
+for distances. Strong asymmetry can require more modes, up to `--mpol 16`,
+or a larger explicit `--boundary-tolerance`.
+
+Supply a new directory under an existing parent. The generator writes
+`case_0.json`, `case_1.json`, and so on, with lower triangularity varying
+fastest. On success, `index.csv` maps every filename to the requested and
+measured parameters. A case error identifies the failed combination and
+cleans up the batch. An existing directory is preserved.
+
 ## Validation and limits
 
 Tests cover all 16 COCOS conventions with four field/current polarity pairs,

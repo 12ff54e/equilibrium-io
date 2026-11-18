@@ -14,7 +14,7 @@
 #ifdef EQUILIBRIUM_COMPONENT_gfile
 #include <sstream>
 
-#include <equilibrium/gfile.hpp>
+#include <equilibrium/miller_batch.hpp>
 #endif
 
 int main() {
@@ -23,6 +23,10 @@ int main() {
         {4, 0}, {3, 2}, {2, 0}, {3, -1}};
     const auto shape = equilibrium::calculate_lcfs_shape(points, 0);
     if (shape.elongation_upper != 2 || shape.elongation_lower != 1) return 7;
+    try {
+        equilibrium::write_miller_batch("does-not-exist.g", "unused-batch", {});
+        return 9;
+    } catch (const std::exception&) {}
     std::istringstream malformed("invalid gfile");
     try {
         equilibrium::gfile_to_cumes_input(malformed);

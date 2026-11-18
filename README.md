@@ -65,7 +65,8 @@ With the `deps/libmeq` submodule on its pinned `delegation` revision,
 `equilibrium::gfile_to_cumes_input` converts a G-file into cuMES input, including
 COCOS signs, toroidal-flux profile remapping, and Fourier boundary fitting.
 `read_gfile_lcfs` and `calculate_lcfs_shape` provide upper/lower elongation and
-triangularity from the original LCFS. The optional `equilibrium::gfile` component
+triangularity from the original LCFS. `write_miller_batch` generates a Cartesian
+scan of Miller boundaries with independent upper and lower shape parameters. The optional `equilibrium::gfile` component
 and `equilibrium-gfile` tool need no CUDA or scientific codecs. See the
 [G-file guide](docs/gfile.md) for build options, formulas, and limits.
 

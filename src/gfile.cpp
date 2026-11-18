@@ -2,6 +2,7 @@
 
 #include "equilibrium/record_validation.hpp"
 #include "equilibrium/writer_helpers.hpp"
+#include "gfile_boundary.hpp"
 
 #include <algorithm>
 #include <array>
@@ -341,10 +342,14 @@ std::vector<LcfsPoint> sample_boundary(GFileRawData<double>& data,
     return sampled;
 }
 
-void fit_boundary(InputParams& input,
-                  std::span<const LcfsPoint> sampled,
-                  GfileInput& result,
-                  const GfileInputSettings& settings) {
+}  // namespace
+
+double gfile_detail::fit_boundary(InputParams& input,
+                                  std::span<const LcfsPoint> sampled,
+                                  LcfsPoint axis,
+                                  double a,
+                                  double tolerance) {
+    double max_error = 0.0;
     std::vector<double> rc(input.mpol), rs(input.mpol), zc(input.mpol),
         zs(input.mpol);
     for (int m = 0; m < input.mpol; ++m) {
@@ -364,10 +369,8 @@ void fit_boundary(InputParams& input,
         zc[m] *= factor;
         zs[m] *= factor;
     }
-    const double a = calculate_lcfs_shape(result.lcfs).minor_radius;
-    const double symmetry_tolerance =
-        1.e-12 * std::max(a, std::abs(result.lcfs.magnetic_axis.r));
-    input.lasym = std::abs(result.lcfs.magnetic_axis.z) > symmetry_tolerance;
+    const double symmetry_tolerance = 1.e-12 * std::max(a, std::abs(axis.r));
+    input.lasym = std::abs(axis.z) > symmetry_tolerance;
     for (int m = 0; m < input.mpol; ++m)
         input.lasym = input.lasym || std::abs(rs[m]) > symmetry_tolerance ||
                       std::abs(zc[m]) > symmetry_tolerance;
@@ -386,17 +389,14 @@ void fit_boundary(InputParams& input,
             dr += m * (-rc[m] * s + rs[m] * c);
             dz += m * (-zc[m] * s + zs[m] * c);
         }
-        require(r > 0.0 && (r - result.lcfs.magnetic_axis.r) * dz -
-                                   (z - result.lcfs.magnetic_axis.z) * dr >
-                               0.0,
+        require(r > 0.0 && (r - axis.r) * dz - (z - axis.z) * dr > 0.0,
                 "G-file Fourier boundary folds or crosses R=0");
-        result.boundary_max_error =
-            std::max(result.boundary_max_error,
-                     std::hypot(r - sampled[k].r, z - sampled[k].z));
+        max_error =
+            std::max(max_error, std::hypot(r - sampled[k].r, z - sampled[k].z));
     }
-    require(result.boundary_max_error <= settings.boundary_tolerance * a,
-            "G-file Fourier boundary error exceeds tolerance; increase mpol or "
-            "crop inside the LCFS");
+    require(max_error <= tolerance * a,
+            "Fourier boundary error exceeds tolerance; increase mpol or adjust "
+            "the boundary");
     for (int m = 0; m < input.mpol; ++m) {
         input.rbc_m.push_back(m);
         input.rbc_n.push_back(0);
@@ -417,7 +417,7 @@ void fit_boundary(InputParams& input,
     input.zbsc = std::move(zs);
     input.rbss.assign(input.mpol, 0.0);
     input.zbcs.assign(input.mpol, 0.0);
-    input.raxis_c = {result.lcfs.magnetic_axis.r};
+    input.raxis_c = {axis.r};
     input.zaxis_s = {0.0};
     if (input.lasym) {
         input.rbsc = std::move(rs);
@@ -425,10 +425,10 @@ void fit_boundary(InputParams& input,
         input.rbcs.assign(input.mpol, 0.0);
         input.zbss.assign(input.mpol, 0.0);
         input.raxis_s = {0.0};
-        input.zaxis_c = {result.lcfs.magnetic_axis.z};
+        input.zaxis_c = {axis.z};
     }
+    return max_error;
 }
-}  // namespace
 
 LcfsShape calculate_lcfs_shape(std::span<const LcfsPoint> points,
                                double z_reference) {
@@ -488,10 +488,9 @@ GfileLcfs read_gfile_lcfs(const std::filesystem::path& path,
     return read_gfile_lcfs(input, cocos);
 }
 
-GfileInput gfile_to_cumes_input(std::istream& stream,
-                                const GfileInputSettings& settings) {
-    validate_settings(settings);
-    auto data = load_gfile(stream, settings.cocos);
+namespace {
+GfileInput make_profiles(const GFileRawData<double>& data,
+                         const GfileInputSettings& settings) {
     const auto factors = data.cocos.factors_to<double>(Cocos(5));
     const double delta =
         factors.flux * (data.flux_LCFS - data.flux_magnetic_axis);
@@ -553,9 +552,28 @@ GfileInput gfile_to_cumes_input(std::istream& stream,
                     settings.poloidal_flux_tolerance,
             "resampled G-file iota changes poloidal flux beyond tolerance; "
             "increase profile_points");
+    return result;
+}
+}  // namespace
+
+GfileInput gfile_detail::read_profiles(const std::filesystem::path& path,
+                                       const GfileInputSettings& settings) {
+    validate_settings(settings);
+    auto stream = open_gfile(path);
+    return make_profiles(load_gfile(stream, settings.cocos), settings);
+}
+
+GfileInput gfile_to_cumes_input(std::istream& stream,
+                                const GfileInputSettings& settings) {
+    validate_settings(settings);
+    auto data = load_gfile(stream, settings.cocos);
+    auto result = make_profiles(data, settings);
     const auto sampled = sample_boundary(data, settings);
-    fit_boundary(input, sampled, result, settings);
-    const auto valid = validate_input_record(input);
+    result.boundary_max_error = gfile_detail::fit_boundary(
+        result.input, sampled, result.lcfs.magnetic_axis,
+        calculate_lcfs_shape(result.lcfs).minor_radius,
+        settings.boundary_tolerance);
+    const auto valid = validate_input_record(result.input);
     if (!valid) throw std::invalid_argument(valid.error());
     return result;
 }
