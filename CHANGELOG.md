@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allow binary readers to set an allocation limit per spectral family.
+
 - Generate cuMES input batches from a G-file with independent Miller ranges
   for major radius and upper/lower elongation and triangularity. Record the
   requested and fitted shape of each case in a CSV index.

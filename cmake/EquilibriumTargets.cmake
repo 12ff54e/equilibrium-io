@@ -9,7 +9,7 @@ function(equilibrium_add_binary_library target)
   # Export a feature/API marker so consumers cannot mix this branch with the
   # incompatible 0.4 records or an older package lacking the spdata writer.
   target_compile_definitions(${target} INTERFACE
-    EQUILIBRIUM_IO_SPDATA_LEGACY_API=1)
+    EQUILIBRIUM_IO_SPDATA_LEGACY_API=1 EQUILIBRIUM_IO_BOUNDED_BINARY_READER=1)
   set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
   target_include_directories(${target} PUBLIC
     $<BUILD_INTERFACE:${EQUILIBRIUM_SOURCE_DIR}/include>

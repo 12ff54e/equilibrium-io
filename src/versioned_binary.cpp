@@ -48,6 +48,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -164,6 +165,9 @@ class VersionedBinaryWriter final : public Writer {
 
 class VersionedBinaryReader final : public Reader {
    public:
+    explicit VersionedBinaryReader(std::size_t max_family_elements)
+        : max_family_elements_(max_family_elements) {}
+
     Result<EquilibriumSnapshot> read(
         const std::string& path,
         std::optional<std::reference_wrapper<RunReport>> report) override {
@@ -202,6 +206,9 @@ class VersionedBinaryReader final : public Reader {
                                                components)) {
             return fail("versioned binary: " + reason);
         }
+        if (n > max_family_elements_)
+            return fail(
+                "versioned binary: spectral family exceeds reader limit");
         EquilibriumSnapshot snapshot;
         snapshot.source_version = version;
         snapshot.ns = ns;
@@ -332,6 +339,9 @@ class VersionedBinaryReader final : public Reader {
         fclose(fp);
         return snapshot;
     }
+
+   private:
+    std::size_t max_family_elements_;
 };
 
 }  // namespace
@@ -342,7 +352,11 @@ std::unique_ptr<Writer> make_binary_writer() {
 }
 
 std::unique_ptr<Reader> make_binary_reader() {
-    return std::make_unique<VersionedBinaryReader>();
+    return make_binary_reader(std::numeric_limits<std::size_t>::max());
+}
+
+std::unique_ptr<Reader> make_binary_reader(std::size_t max_family_elements) {
+    return std::make_unique<VersionedBinaryReader>(max_family_elements);
 }
 
 }  // namespace equilibrium
