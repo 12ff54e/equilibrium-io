@@ -27,6 +27,10 @@ int main() {
         equilibrium::write_miller_batch("does-not-exist.g", "unused-batch", {});
         return 9;
     } catch (const std::exception&) {}
+    try {
+        equilibrium::sample_gfile_boozer("missing.g", 9, 24);
+        return 10;
+    } catch (const std::exception&) {}
     std::istringstream malformed("invalid gfile");
     try {
         equilibrium::gfile_to_cumes_input(malformed);

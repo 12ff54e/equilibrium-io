@@ -24,6 +24,24 @@ struct GfileLcfs {
     int cocos = 1;  // Resolved source convention; coordinates stay in metres.
 };
 
+// Physical SI samples from libmeq, in COCOS 2. psi is measured from the
+// magnetic axis. z is relative to its height. Fields are [surface][angle]
+// at theta=(j+1/2)*2*pi/nt, increasing CCW from the outboard midplane.
+struct GfileBoozerSamples {
+    LcfsPoint axis;
+    int source_cocos = 0;
+    std::size_t nt = 0;
+    double axis_f = 0., axis_q = 0., axis_pressure = 0.;
+    std::vector<double> psi, f, q, pressure, current_i;  // I = <Bp^2 J>
+    std::vector<double> b, r, z, jacobian;
+};
+
+GfileBoozerSamples sample_gfile_boozer(const std::filesystem::path& path,
+                                       std::size_t radial_points,
+                                       std::size_t poloidal_points,
+                                       double psi_ratio = 0.99,
+                                       std::optional<int> cocos = std::nullopt);
+
 struct LcfsShape {
     double r_center = 0.0;  // (R_max + R_min)/2, not the magnetic-axis R.
     double minor_radius = 0.0;

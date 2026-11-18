@@ -22,6 +22,7 @@
 
 #include <Contour.h>
 #include <GFileRawData.h>
+#include <MagneticEquilibrium.h>
 
 namespace equilibrium {
 namespace {
@@ -258,8 +259,7 @@ class FluxProfile {
     double limit_ = 1.0, edge_ = 0.0;
 };
 
-std::vector<LcfsPoint> sample_boundary(GFileRawData<double>& data,
-                                       const GfileInputSettings& settings) {
+void validate_contour(const GFileRawData<double>& data) {
     const auto axis = data.magnetic_axis;
     const double left = data.r_left, right = left + data.dim.x();
     const double bottom = data.z_mid - 0.5 * data.dim.y();
@@ -269,7 +269,7 @@ std::vector<LcfsPoint> sample_boundary(GFileRawData<double>& data,
                point.y() <= top;
     };
     require(inside(axis), "G-file magnetic axis is outside the flux grid");
-    std::vector<Vec<2, double>> contour = data.boundary;
+    const auto& contour = data.boundary;
     double winding = 0.0;
     for (std::size_t k = 0; k < contour.size(); ++k) {
         require(inside(contour[k]), "G-file LCFS is outside the flux grid");
@@ -285,6 +285,16 @@ std::vector<LcfsPoint> sample_boundary(GFileRawData<double>& data,
     }
     require(std::abs(std::abs(winding) - PERIOD) < 1.e-8,
             "G-file LCFS must wind once around the magnetic axis");
+}
+
+std::vector<LcfsPoint> sample_boundary(GFileRawData<double>& data,
+                                       const GfileInputSettings& settings) {
+    validate_contour(data);
+    const auto axis = data.magnetic_axis;
+    const double left = data.r_left, right = left + data.dim.x();
+    const double bottom = data.z_mid - .5 * data.dim.y(),
+                 top = data.z_mid + .5 * data.dim.y();
+    auto contour = data.boundary;
     if (settings.psi_ratio < 1.0) {
         require(data.nw >= 6 && data.nh >= 6,
                 "G-file contour cropping requires at least a 6x6 flux grid");
@@ -479,6 +489,105 @@ LcfsShape calculate_lcfs_shape(std::span<const LcfsPoint> points,
 LcfsShape calculate_lcfs_shape(const GfileLcfs& lcfs) {
     return calculate_lcfs_shape(lcfs.points, lcfs.magnetic_axis.z);
 }
+GfileBoozerSamples sample_gfile_boozer(const std::filesystem::path& path,
+                                       std::size_t radial_points,
+                                       std::size_t nt,
+                                       double ratio,
+                                       std::optional<int> cocos) {
+    require(radial_points >= 3 && radial_points <= 9999 && nt >= 3 &&
+                nt <= 999 && std::isfinite(ratio) && ratio > 0 && ratio <= 1,
+            "invalid G-file Boozer sampling grid or flux ratio");
+    auto stream = open_gfile(path);
+    auto g = load_gfile(stream, cocos);
+    validate_contour(g);
+    require(
+        g.nw >= 6 && g.nh >= 6 && g.boundary.size() >= 6,
+        "libmeq quintic interpolation needs a 6x6 grid and six LCFS points");
+    const auto nr = std::max<std::size_t>(8, radial_points + radial_points % 2);
+    require(nr <= (1U << 24) / g.boundary.size(),
+            "G-file contour count exceeds resource limit");
+    const auto factors = g.boozer_factors();
+    const double edge = factors.flux * (g.flux_LCFS - g.flux_magnetic_axis);
+    require(std::isfinite(edge) && edge != 0., "invalid G-file flux interval");
+    const double f0 = factors.toroidal * g.f_pol.front();
+    const auto good_profiles = [&](double f, double q, double p) {
+        return f != 0 && std::isfinite(f) &&
+               std::signbit(f) == std::signbit(f0) && q != 0 &&
+               std::isfinite(q) &&
+               std::signbit(q) == (std::signbit(f) != std::signbit(edge)) &&
+               std::isfinite(p) && p >= 0.;
+    };
+    for (std::size_t i = 0; i < g.nw; ++i)
+        require(good_profiles(factors.toroidal * g.f_pol[i],
+                              factors.safety_factor * g.safety_factor[i],
+                              g.pressure[i]),
+                "G-file needs fixed, consistent q/F/flux signs and nonnegative "
+                "pressure");
+    // load_gfile retains the supplied polygon order for shape measurements.
+    // libmeq needs its points and angle vector in the same ascending order.
+    g.geometric_poloidal_angles.clear();
+    g.rearrange_boundary();
+    require(g.geometric_poloidal_angles.size() == g.boundary.size() &&
+                std::adjacent_find(g.geometric_poloidal_angles.begin(),
+                                   g.geometric_poloidal_angles.end(),
+                                   std::greater_equal<double>{}) ==
+                    g.geometric_poloidal_angles.end(),
+            "invalid G-file polar angle ordering");
+    MagneticEquilibrium sampled(
+        g, radial_points, nt, nr, ratio, true,
+        [&](auto p) {
+            require(good_profiles(p.f, p.q, p.p),
+                    "invalid interpolated G-file profile");
+            return std::array{p.psi, p.f, p.q, p.p};
+        },
+        [&](auto p, auto pt) {
+            const double b = std::hypot(p.f, pt.dpdr, pt.dpdz) / pt.r;
+            const double j = p.b2j / (b * b);
+            const double bp = std::hypot(pt.dpdr, pt.dpdz) / pt.r;
+            require(std::isfinite(b) && b > 0 && std::isfinite(j) && j != 0 &&
+                        std::signbit(j) == std::signbit(edge) &&
+                        std::isfinite(pt.z) && pt.r > 0 && std::isfinite(pt.r),
+                    "invalid G-file field or Boozer Jacobian");
+            if (p.psi != 0.)
+                require((pt.r - g.magnetic_axis.x()) * (pt.dpdr / edge) +
+                                pt.z * (pt.dpdz / edge) >
+                            0.,
+                        "G-file flux surface folds along a ray from the axis");
+            return std::array{b, pt.r, pt.z, j, bp * bp * j};
+        },
+        std::false_type{});
+    GfileBoozerSamples out;
+    out.axis = {g.magnetic_axis.x(), g.magnetic_axis.y()};
+    out.source_cocos = g.cocos.index();
+    out.nt = nt;
+    out.axis_f = sampled.axis_value_1d(1);
+    out.axis_q = sampled.axis_value_1d(2);
+    out.axis_pressure = sampled.axis_value_1d(3);
+    out.psi = sampled.data_1d(0);
+    out.f = sampled.data_1d(1);
+    out.q = sampled.data_1d(2);
+    out.pressure = sampled.data_1d(3);
+    require(std::abs(out.psi.back() / edge - ratio) <= 1.e-4 * ratio,
+            "libmeq could not reach the requested G-file flux ratio");
+    std::array fields{&out.b, &out.r, &out.z, &out.jacobian};
+    for (std::size_t f = 0; f < fields.size(); ++f) {
+        fields[f]->reserve(nr * nt);
+        for (std::size_t k = 0; k < nr; ++k)
+            for (std::size_t t = 0; t < nt; ++t)
+                fields[f]->push_back(sampled.data_2d(f)(k, t));
+    }
+    out.current_i.resize(nr);
+    for (std::size_t k = 0; k < nr; ++k) {
+        require(out.psi[k] / edge > (k == 0 ? 0. : out.psi[k - 1] / edge),
+                "G-file Boozer flux samples must increase outward");
+        double sum = 0.;
+        for (std::size_t t = 0; t < nt; ++t) sum += sampled.data_2d(4)(k, t);
+        require(std::isfinite(sum), "nonfinite G-file surface current");
+        out.current_i[k] = sum / static_cast<double>(nt);
+    }
+    return out;
+}
+
 GfileLcfs read_gfile_lcfs(std::istream& input, std::optional<int> cocos) {
     return lcfs_of(load_gfile(input, cocos));
 }

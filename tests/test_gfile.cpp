@@ -39,6 +39,45 @@ equilibrium::GfileInput convert(
     std::istringstream stream(gfile_test::fixture(source));
     return equilibrium::gfile_to_cumes_input(stream, settings);
 }
+void boozer_samples(const std::filesystem::path& dir) {
+    using namespace gfile_test;
+    for (int ip : {-1, 1})
+        for (int bt : {-1, 1}) {
+            Settings source;
+            source.cocos = 16;
+            source.current_sign = ip;
+            source.field_sign = bt;
+            source.reverse_boundary = ip < 0;
+            source.close_boundary = true;
+            const auto path = dir / "boozer-samples.g";
+            std::ofstream(path) << fixture(source);
+            const auto samples =
+                equilibrium::sample_gfile_boozer(path, 9, 24, .8);
+            check(samples.nt == 24 && samples.psi.size() == 10 &&
+                      samples.b.size() == 240,
+                  "libmeq sample grid");
+            close(samples.axis_f, -6. * bt, 1e-9, "COCOS 2 F");
+            close(samples.axis_q, ip * bt * Q0, 1e-8, "COCOS 2 q");
+            close(samples.psi.back(), -ip * .8 * PSI, 3e-9,
+                  "signed cropped psi");
+            for (std::size_t j = 0; j < samples.psi.size(); ++j) {
+                const double u = -ip * samples.psi[j] / PSI;
+                for (std::size_t t = 0; t < samples.nt; ++t) {
+                    const auto k = j * samples.nt + t;
+                    const double x = samples.r[k] - R0, z = samples.z[k];
+                    close(x * x / (A * A) + z * z / (B * B), u, 2e-6,
+                          "shifted elliptic contour");
+                    const double b = std::hypot(6., 2 * PSI * x / (A * A),
+                                                2 * PSI * z / (B * B)) /
+                                     samples.r[k];
+                    close(samples.b[k], b, 2e-7,
+                          "magnetic field from physical flux derivatives");
+                    check(samples.jacobian[k] * (-ip) > 0.,
+                          "signed COCOS 2 Jacobian");
+                }
+            }
+        }
+}
 void shapes() {
     using equilibrium::LcfsPoint;
     const std::vector<LcfsPoint> points{
@@ -381,6 +420,7 @@ int main(int argc, char** argv) {
                                         : std::filesystem::current_path();
         shapes();
         conventions(directory);
+        boozer_samples(directory);
         refinement_and_cropping();
         malformed_and_geometry_only(directory);
         std::cout << "G-file conversion and LCFS shapes: PASS (64 "

@@ -105,6 +105,14 @@ relative discrepancy; the default limit is `1e-3`. Increase `profile_points`
 when needed. No q zero, q-sign reversal, inconsistent F sign, or negative
 pressure is accepted for input conversion.
 
+The optional `sample_gfile_boozer` interface calls libmeq's
+`MagneticEquilibrium` directly on the source grid. It returns signed COCOS 2
+profiles and fields in physical units, with CCW half-step Boozer angles,
+axis-relative Z, and a signed poloidal-flux Jacobian. The requested radial
+resolution sets the first positive flux. libmeq samples from there to the
+cropped edge on an even grid of at least eight surfaces. A crop discrepancy
+larger than one part in ten thousand is an error.
+
 ## Boundary fitting and cropping
 
 At `psi_ratio=1`, the supplied LCFS is used without a flux-grid contour search.
